@@ -1,0 +1,15 @@
+__pycache__
+.coverage
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.ipynb_checkpoints
+.venv
+*.egg-info
+
+# unsloth
+unsloth_compiled_cache
+
+# project
+data/*
+outputs/models/*

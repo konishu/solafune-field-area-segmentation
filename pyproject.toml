@@ -30,6 +30,13 @@ dependencies = [
   "unsloth-zoo>=2025.3.16",
   "vllm==0.8.1",
   "wandb>=0.16.4",
+  "rasterio",
+  "opencv-python>=4.0", # Added for cv2 import
+  "albumentations>=1.0", # Added for A import
+  "numpy>=1.20", # Added for np import (often a dependency, but good to be explicit)
+  "shapely>=2.1.0",
+  "scikit-image>=0.25.2",
+  "timm>=1.0.15",
 ]
 
 [tool.uv]

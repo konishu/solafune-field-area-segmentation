@@ -56,6 +56,9 @@ def train_model(model, dataloader, num_epochs=10, device='cuda'):
                 continue
             imgs, masks = batch
 
+            # バッチの形状をログに出力
+            print(f"Batch shapes - imgs: {imgs.shape}, masks: {masks.shape}")
+
             # Ensure masks are FloatTensor for BCEWithLogitsLoss and scale to 0.0-1.0
             # Dataset now returns uint8 [0, 255], convert to float [0.0, 1.0]
             imgs = imgs.to(device)
@@ -66,6 +69,10 @@ def train_model(model, dataloader, num_epochs=10, device='cuda'):
 
             # Forward pass
             outputs = model(imgs)
+            
+            # モデルの出力形状をログに出力
+            print(f"Model output shape: {outputs.shape}, masks shape: {masks.shape}")
+            
             # Ensure output and target shapes match for BCEWithLogitsLoss: (N, C, H, W)
             loss = criterion(outputs, masks)
 
@@ -90,9 +97,9 @@ if __name__ == "__main__":
     BACKBONE = 'maxvit_small_tf_512.in1k' # Example backbone
     NUM_OUTPUT_CHANNELS = 3 # Number of output channels (field, edge, contact)
     PRETRAINED = True
-    BATCH_SIZE = 4 # Adjust based on GPU memory
+    BATCH_SIZE = 1 # Adjust based on GPU memory
     NUM_WORKERS = 4 # Adjust based on CPU cores
-    NUM_EPOCHS = 20 # Number of training epochs
+    NUM_EPOCHS = 2 # Number of training epochs
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     INPUT_H = 512 # Original image height (example)
     INPUT_W = 512 # Original image width (example)
@@ -110,12 +117,24 @@ if __name__ == "__main__":
     print("Setting up dataset and dataloader...")
     # Define transformations including the required resize
     # Note: Normalization is handled inside the Dataset class now
+    
+    # MaxViTモデルは入力サイズが16の倍数である必要があるため、それに合わせて調整
+    # 各画像のサイズは異なるため、PadIfNeededを使用して16の倍数にパディング
     transform = A.Compose([
-        A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_LINEAR), # Use cv2 for interpolation
+        # まず指定サイズにリサイズ
+        A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_LINEAR),
+        # 16の倍数になるようにパディング（min_heightとmin_widthは16の倍数に切り上げ）
+        A.PadIfNeeded(
+            min_height=16 * ((RESIZE_H + 15) // 16),
+            min_width=16 * ((RESIZE_W + 15) // 16),
+            border_mode=cv2.BORDER_CONSTANT
+        ),
         # Add other augmentations here if needed (e.g., Flip, Rotate)
         # A.HorizontalFlip(p=0.5),
         ToTensorV2(), # Converts image HWC->CHW, mask HWC->CHW, scales image 0-255 -> 0-1 (mask remains 0 or 255 uint8)
     ])
+    
+    print(f"Images will be resized to {RESIZE_H}x{RESIZE_W} and padded to ensure dimensions are divisible by 16")
 
     # Ensure FieldSegmentationDataset is correctly implemented and paths/file are valid
     try:

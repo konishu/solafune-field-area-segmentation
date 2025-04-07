@@ -7,7 +7,7 @@ import rasterio
 import cv2
 from shapely.wkt import loads as wkt_loads
 from shapely.geometry import mapping # To convert polygon to coordinates
-from skimage.morphology import erosion, dilation, square
+from skimage.morphology import erosion, dilation, footprint_rectangle
 from skimage.segmentation import watershed
 # from skimage.measure import label as skimage_label # Not used in this implementation
 
@@ -228,7 +228,7 @@ class FieldSegmentationDataset(Dataset):
         # 2. Edge mask
         edge_mask = np.zeros(img_shape, dtype=np.uint8)
         if self.edge_width > 0 and instance_id > 0: # Check instance_id > 0 (actual number of instances)
-            selem_edge = square(self.edge_width)
+            selem_edge = footprint_rectangle((self.edge_width, self.edge_width))
             for i in range(1, instance_id + 1): # Iterate up to the actual number of instances processed
                 instance_mask = (labels == i)
                 if np.any(instance_mask): # Check if the instance exists and is not empty
@@ -244,7 +244,7 @@ class FieldSegmentationDataset(Dataset):
         contact_mask = np.zeros(img_shape, dtype=np.uint8)
         # Need at least 2 actual instances processed for contact
         if self.contact_width > 0 and instance_id > 1:
-            selem_contact = square(self.contact_width)
+            selem_contact = footprint_rectangle((self.contact_width, self.contact_width))
             try:
                 # Dilate the field mask to find potential contact zones
                 dilated_field = dilation(field_mask, selem_contact)
@@ -292,19 +292,49 @@ class FieldSegmentationDataset(Dataset):
         # Apply transformations (e.g., Albumentations)
         if self.transform:
             try:
+                print(f"Applying transformations for {img_filename}...")
                 # Albumentations expects image: (H, W, C), mask: (H, W, C) or (H, W, N)
-                img_for_transform = img.transpose(1, 2, 0) # (H, W, C)
-                mask_for_transform = mask.transpose(1, 2, 0) # (H, W, 3)
-
+                img_for_transform = img.transpose((1, 2, 0)) # (H, W, C) - NumPyスタイルの転置
+                mask_for_transform = mask.transpose((1, 2, 0)) # (H, W, 3) - NumPyスタイルの転置
+                print(f"Input shapes for transform: image={img_for_transform.shape}, mask={mask_for_transform.shape}")
                 augmented = self.transform(image=img_for_transform, mask=mask_for_transform)
 
-                img = augmented['image'].transpose(2, 0, 1) # Back to (C, H, W)
-                mask = augmented['mask'].transpose(2, 0, 1) # Back to (3, H, W)
+                img = augmented['image'] # Already (C, H, W) tensor from ToTensorV2
+                mask = augmented['mask'] # Already (C, H, W) tensor from ToTensorV2
 
-                # Ensure mask dtype is correct after transforms (some might change it)
-                mask = mask.astype(np.uint8)
-                # Ensure image dtype is float32
-                img = img.astype(np.float32)
+                # 変換後のサイズをログに出力して確認
+                print(f"After transform: image shape={img.shape}, mask shape={mask.shape}")
+                # 16の倍数かどうかを確認
+                if img.shape[1] % 16 != 0 or img.shape[2] % 16 != 0:
+                    print(f"Warning: Transformed image dimensions ({img.shape[1]}x{img.shape[2]}) are not divisible by 16")
+                
+                # ToTensorV2の後、imgとmaskはすでにPyTorchテンソル
+                # テンソルの型変換にはto()メソッドを使用
+                if isinstance(mask, torch.Tensor):
+                    # マスクの形状を確認し、必要に応じてCHW形式に変換
+                    print(f"Before conversion - mask shape: {mask.shape}, type: {mask.dtype}")
+                    if mask.ndim == 3 and mask.shape[0] != 3 and mask.shape[2] == 3:  # HWC形式の場合
+                        print(f"Converting mask from HWC to CHW format: {mask.shape}")
+                        mask = mask.permute(2, 0, 1)  # HWC -> CHW
+                        print(f"After permute - mask shape: {mask.shape}")
+                    mask = mask.to(torch.uint8)  # テンソルの場合はto()を使用
+                    print(f"Final mask shape: {mask.shape}, type: {mask.dtype}")
+                else:
+                    print(f"Mask is NumPy array with shape: {mask.shape}, type: {mask.dtype}")
+                    mask = mask.astype(np.uint8)  # NumPy配列の場合はastype()を使用
+                
+                if isinstance(img, torch.Tensor):
+                    # 画像の形状を確認し、必要に応じてCHW形式に変換
+                    print(f"Before conversion - image shape: {img.shape}, type: {img.dtype}")
+                    if img.ndim == 3 and img.shape[0] != 12 and img.shape[2] == 12:  # HWC形式の場合
+                        print(f"Converting image from HWC to CHW format: {img.shape}")
+                        img = img.permute(2, 0, 1)  # HWC -> CHW
+                        print(f"After permute - image shape: {img.shape}")
+                    img = img.to(torch.float32)  # テンソルの場合はto()を使用
+                    print(f"Final image shape: {img.shape}, type: {img.dtype}")
+                else:
+                    print(f"Image is NumPy array with shape: {img.shape}, type: {img.dtype}")
+                    img = img.astype(np.float32)  # NumPy配列の場合はastype()を使用
 
             except Exception as e:
                 print(f"Error during transform application for {img_filename}: {e}")
@@ -315,11 +345,17 @@ class FieldSegmentationDataset(Dataset):
                 mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8)
                 # img is already normalized before transform attempt
 
-        # Convert to tensors
-        # Use .copy() to ensure tensors own their memory, especially after transforms or slicing
+        # Convert to tensors if they aren't already
         try:
-            img_tensor = torch.from_numpy(img.copy()).float()
-            mask_tensor = torch.from_numpy(mask.copy()).to(torch.uint8) # Keep as uint8
+            if isinstance(img, np.ndarray):
+                img_tensor = torch.from_numpy(img.copy()).float()
+            else:
+                img_tensor = img.clone()  # すでにテンソルの場合はclone()を使用
+                
+            if isinstance(mask, np.ndarray):
+                mask_tensor = torch.from_numpy(mask.copy()).to(torch.uint8)
+            else:
+                mask_tensor = mask.clone()  # すでにテンソルの場合はclone()を使用
         except Exception as e:
             print(f"Error converting numpy arrays to tensors for {img_filename}: {e}")
             raise TypeError(f"Could not convert data to tensors for {img_filename}") from e
@@ -329,5 +365,9 @@ class FieldSegmentationDataset(Dataset):
              raise ValueError(f"Final tensor shape mismatch for {img_filename}: "
                               f"Image shape {img_tensor.shape}, Mask shape {mask_tensor.shape}")
 
+        # 最終的なテンソルの形状をログに出力
+        print(f"Final tensors for {img_filename}:")
+        print(f"  Image tensor: shape={img_tensor.shape}, type={img_tensor.dtype}")
+        print(f"  Mask tensor: shape={mask_tensor.shape}, type={mask_tensor.dtype}")
 
         return img_tensor, mask_tensor

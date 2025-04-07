@@ -5,7 +5,7 @@ import timm
 class UNet(nn.Module):
     def __init__(self, backbone_name='maxvit_small_tf_512.in1k', pretrained=True, num_classes=3):
         super().__init__()
-        self.encoder = timm.create_model(backbone_name, pretrained=pretrained, features_only=True)
+        self.encoder = timm.create_model(backbone_name, pretrained=pretrained, in_chans=12, features_only=True)
 
         # encoder outputs
         channels = [f['num_chs'] for f in self.encoder.feature_info]

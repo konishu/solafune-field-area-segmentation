@@ -9,6 +9,9 @@ import numpy as np
 import cv2 # Import OpenCV
 import os
 
+from torchsummary import summary
+
+
 # Assuming FieldSegmentationDataset is defined in utils.dataset and UNet in models.unet_maxvit
 # Adjust imports based on your actual project structure if different
 try:
@@ -63,17 +66,31 @@ def train_model(model, dataloader, num_epochs=10, device='cuda'):
             # Dataset now returns uint8 [0, 255], convert to float [0.0, 1.0]
             imgs = imgs.to(device)
             masks = masks.to(device, dtype=torch.float) / 255.0
+            
 
             # Zero the parameter gradients
             optimizer.zero_grad()
+            print("====================================")
 
             # Forward pass
             outputs = model(imgs)
+            print("-----------------")
             
-            # モデルの出力形状をログに出力
-            print(f"Model output shape: {outputs.shape}, masks shape: {masks.shape}")
-            
+            # モデルの出力形状とマスクの形状を損失計算直前に再度確認
+            print(f"[Before Loss] Model output shape: {outputs.shape}, dtype: {outputs.dtype}")
+            print(f"[Before Loss] Masks shape: {masks.shape}, dtype: {masks.dtype}")
+
             # Ensure output and target shapes match for BCEWithLogitsLoss: (N, C, H, W)
+            # Check spatial dimensions explicitly
+            if outputs.shape[2:] != masks.shape[2:]:
+                 print(f"Error: Spatial dimensions mismatch! Output: {outputs.shape[2:]}, Mask: {masks.shape[2:]}")
+                 # Optionally raise an error or handle it
+                 raise ValueError(f"Spatial dimension mismatch between model output {outputs.shape} and mask {masks.shape}")
+            # Check channel dimension (should be handled by the error message, but good to be explicit)
+            if outputs.shape[1] != masks.shape[1]:
+                 print(f"Error: Channel dimensions mismatch! Output: {outputs.shape[1]}, Mask: {masks.shape[1]}")
+                 raise ValueError(f"Channel dimension mismatch between model output {outputs.shape} and mask {masks.shape}")
+
             loss = criterion(outputs, masks)
 
             # Backward pass and optimize
@@ -92,18 +109,19 @@ def train_model(model, dataloader, num_epochs=10, device='cuda'):
 if __name__ == "__main__":
     # --- Configuration ---
     ROOT_DIR = '/workspace/projects/solafune-field-area-segmentation'
-    IMAGE_DIR = os.path.join(ROOT_DIR, 'data/train_images') # Path to training images (adjust if needed)
+    IMAGE_DIR = os.path.join(ROOT_DIR, 'data/train_images_mini') # Path to training images (adjust if needed)
     ANNOTATION_FILE = os.path.join(ROOT_DIR, 'data/train_annotation.json') # Path to training annotations (adjust if needed)
+    OUTPUT_DIR = os.path.join(ROOT_DIR, 'outputs','ex0') # Path to save model outputs
     BACKBONE = 'maxvit_small_tf_512.in1k' # Example backbone
     NUM_OUTPUT_CHANNELS = 3 # Number of output channels (field, edge, contact)
     PRETRAINED = True
-    BATCH_SIZE = 1 # Adjust based on GPU memory
+    BATCH_SIZE = 4 # Adjust based on GPU memory
     NUM_WORKERS = 4 # Adjust based on CPU cores
     NUM_EPOCHS = 2 # Number of training epochs
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     INPUT_H = 512 # Original image height (example)
     INPUT_W = 512 # Original image width (example)
-    SCALE_FACTOR = 3 # Resize scale factor from requirements
+    SCALE_FACTOR = 1 # Resize scale factor from requirements
     RESIZE_H = INPUT_H * SCALE_FACTOR
     RESIZE_W = INPUT_W * SCALE_FACTOR
     # Pre-calculated mean/std (Example values - REPLACE WITH YOUR ACTUAL VALUES)
@@ -152,16 +170,28 @@ if __name__ == "__main__":
              print(f"Error: Dataset is empty. Check image path '{IMAGE_DIR}' and annotation file '{ANNOTATION_FILE}', and ensure they contain matching, valid data.")
              # Exit if dataset is empty, as dummy data generation is complex here
              exit()
+        print(f"Dataset initialized with {len(dataset)} samples.")
         dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True if DEVICE == 'cuda' else False)
         print(f"Dataset size: {len(dataset)}, Dataloader ready.")
 
         print("Initializing model...")
         # Initialize model with the number of output channels (not classes for BCE loss)
         model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS)
+        model.to(DEVICE)  # Move model to the specified device
+        print(summary(model, (12, 512, 512)))
         print(f"Model: UNet with {BACKBONE} backbone, {NUM_OUTPUT_CHANNELS} output channels.")
 
         # Start training
         train_model(model, dataloader, num_epochs=NUM_EPOCHS, device=DEVICE)
+        
+        # Save the model after training
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR)
+            print(f"Output directory {OUTPUT_DIR} created.")
+        else:
+            print(f"Output directory {OUTPUT_DIR} already exists. Model will be saved there.")
+        torch.save(model.state_dict(), os.path.join(OUTPUT_DIR,'model.path'))
+        print(f"Model saved to {OUTPUT_DIR}")
 
     except NameError:
          print("Error: FieldSegmentationDataset or UNet class not found. Ensure 'src' is in PYTHONPATH or run from the project root. Cannot run training.")

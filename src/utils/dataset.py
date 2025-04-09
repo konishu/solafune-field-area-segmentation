@@ -79,7 +79,7 @@ class FieldSegmentationDataset(Dataset):
             self.mean = None
             self.std = None
 
-        print(f"Loading annotations from {ann_json_path}...")
+        # print(f"Loading annotations from {ann_json_path}...")
         try:
             with open(ann_json_path, 'r') as f:
                 ann_data = json.load(f)
@@ -292,18 +292,18 @@ class FieldSegmentationDataset(Dataset):
         # Apply transformations (e.g., Albumentations)
         if self.transform:
             try:
-                print(f"Applying transformations for {img_filename}...")
+                # print(f"Applying transformations for {img_filename}...")
                 # Albumentations expects image: (H, W, C), mask: (H, W, C) or (H, W, N)
                 img_for_transform = img.transpose((1, 2, 0)) # (H, W, C) - NumPyスタイルの転置
                 mask_for_transform = mask.transpose((1, 2, 0)) # (H, W, 3) - NumPyスタイルの転置
-                print(f"Input shapes for transform: image={img_for_transform.shape}, mask={mask_for_transform.shape}")
+                # print(f"Input shapes for transform: image={img_for_transform.shape}, mask={mask_for_transform.shape}")
                 augmented = self.transform(image=img_for_transform, mask=mask_for_transform)
 
                 img = augmented['image'] # Already (C, H, W) tensor from ToTensorV2
                 mask = augmented['mask'] # Already (C, H, W) tensor from ToTensorV2
 
-                # 変換後のサイズをログに出力して確認
-                print(f"After transform: image shape={img.shape}, mask shape={mask.shape}")
+                # # 変換後のサイズをログに出力して確認
+                # print(f"After transform: image shape={img.shape}, mask shape={mask.shape}")
                 # 16の倍数かどうかを確認
                 if img.shape[1] % 16 != 0 or img.shape[2] % 16 != 0:
                     print(f"Warning: Transformed image dimensions ({img.shape[1]}x{img.shape[2]}) are not divisible by 16")
@@ -312,7 +312,7 @@ class FieldSegmentationDataset(Dataset):
                 # テンソルの型変換にはto()メソッドを使用
                 if isinstance(mask, torch.Tensor):
                     # マスクの形状を確認し、必要に応じてCHW形式に変換
-                    print(f"Before conversion - mask shape: {mask.shape}, type: {mask.dtype}")
+                    # print(f"Before conversion - mask shape: {mask.shape}, type: {mask.dtype}")
                     if mask.ndim == 3 and mask.shape[0] != 3 and mask.shape[2] == 3:  # HWC形式の場合
                         print(f"Converting mask from HWC to CHW format: {mask.shape}")
                         mask = mask.permute(2, 0, 1)  # HWC -> CHW
@@ -365,9 +365,9 @@ class FieldSegmentationDataset(Dataset):
              raise ValueError(f"Final tensor shape mismatch for {img_filename}: "
                               f"Image shape {img_tensor.shape}, Mask shape {mask_tensor.shape}")
 
-        # 最終的なテンソルの形状をログに出力
-        print(f"Final tensors for {img_filename}:")
-        print(f"  Image tensor: shape={img_tensor.shape}, type={img_tensor.dtype}")
-        print(f"  Mask tensor: shape={mask_tensor.shape}, type={mask_tensor.dtype}")
+        # # 最終的なテンソルの形状をログに出力
+        # print(f"Final tensors for {img_filename}:")
+        # print(f"  Image tensor: shape={img_tensor.shape}, type={img_tensor.dtype}")
+        # print(f"  Mask tensor: shape={mask_tensor.shape}, type={mask_tensor.dtype}")
 
         return img_tensor, mask_tensor

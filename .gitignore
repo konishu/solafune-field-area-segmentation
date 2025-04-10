@@ -13,3 +13,4 @@ unsloth_compiled_cache
 # project
 data/*
 outputs/models/*
+outputs/ex*

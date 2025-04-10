@@ -39,9 +39,9 @@ def inference(model_path, image_path, output_path, device='cuda'):
     # --- Configuration ---
     INPUT_H = 512 # Original image height (example)
     INPUT_W = 512 # Original image width (example)
-    SCALE_FACTOR = 2 # Resize scale factor from requirements
-    RESIZE_H = INPUT_H * SCALE_FACTOR
-    RESIZE_W = INPUT_W * SCALE_FACTOR
+    SCALE_FACTOR = 3 # Resize scale factor from requirements (Match train.py default or make it an argument)
+    RESIZE_H = 1024
+    RESIZE_W = 1024
     # ---------------------
 
     # 1. Load the model
@@ -59,7 +59,19 @@ def inference(model_path, image_path, output_path, device='cuda'):
         if image is None:
             raise FileNotFoundError(f"Image not found at {image_path}")
 
-        # Normalize image (per-image normalization)
+        # --- Stage 1 Resize based on scale_factor ---
+        if SCALE_FACTOR != 1.0:
+            target_h = int(original_shape[0] * SCALE_FACTOR)
+            target_w = int(original_shape[1] * SCALE_FACTOR)
+            # Resize image (C, H, W) -> (H, W, C) -> resize -> (C, H, W)
+            img_hwc = image.transpose((1, 2, 0))
+            img_resized_hwc = cv2.resize(img_hwc, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            if img_resized_hwc.ndim == 2:
+                 img_resized_hwc = np.expand_dims(img_resized_hwc, axis=-1)
+            image = img_resized_hwc.transpose((2, 0, 1))
+            print(f"Image resized by scale_factor {SCALE_FACTOR} to shape: {image.shape}")
+
+        # Normalize image (per-image normalization) - applied AFTER scale_factor resize
         img_mean = image.mean(axis=(1, 2), keepdims=True)
         img_std = image.std(axis=(1, 2), keepdims=True)
         image = (image - img_mean) / (img_std + 1e-6)
@@ -94,6 +106,9 @@ def inference(model_path, image_path, output_path, device='cuda'):
     transformed = transform(image=image)
     image = transformed["image"] # ToTensorV2 already converts to (C, H, W) tensor
     image = image.unsqueeze(0).to(device)  # Add batch dimension and move to device
+
+    # imageの0,1,2チャンネルからpng画像を作成
+    cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/output_images/{image_path.split('/')[-1].replace('.tif','')}.png', (image[0, 0].cpu().numpy() * 255).astype(np.uint8))
 
     # 3. Perform inference
     with torch.no_grad():  # Disable gradient calculation during inference
@@ -138,7 +153,7 @@ if __name__ == "__main__":
     model_path = '../outputs/ex0/model.path'  # Path to your trained model
     image_path = '/workspace/projects/solafune-field-area-segmentation/data/test_images/test_0.tif'  # Path to your test image
     # image_path = '/workspace/projects/solafune-field-area-segmentation/data/train_images/train_0.tif'  # Path to your test image
-    output_path = f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/output_images/{image_path.split('/')[-1].replace('.tif','')}.png'  # Path to save the segmentation result
+    output_path = f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/output_images/inference_{image_path.split('/')[-1].replace('.tif','')}.png'  # Path to save the segmentation result
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     inference(model_path, image_path, output_path, device)

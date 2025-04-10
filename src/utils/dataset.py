@@ -49,8 +49,9 @@ class FieldSegmentationDataset(Dataset):
         mean (list or np.array, optional): Pre-calculated mean for each channel for normalization.
         std (list or np.array, optional): Pre-calculated standard deviation for each channel for normalization.
     """
-    def __init__(self, img_dir, ann_json_path, edge_width=3, contact_width=3, transform=None, mean=None, std=None):
+    def __init__(self, img_dir, ann_json_path, scale_factor=1.0, edge_width=3, contact_width=3, transform=None, mean=None, std=None):
         self.img_dir = img_dir
+        self.scale_factor = scale_factor
         self.edge_width = edge_width
         self.contact_width = contact_width
         self.transform = transform
@@ -120,7 +121,6 @@ class FieldSegmentationDataset(Dataset):
              # Depending on use case, might want to raise error or allow empty dataset
              # raise ValueError(f"No matching image files found in {img_dir} for annotations in {ann_json_path}")
 
-
     def __len__(self):
         return len(self.img_filenames)
 
@@ -153,6 +153,21 @@ class FieldSegmentationDataset(Dataset):
             raise ValueError(f"Image loaded from {img_path} has unexpected shape: {img.shape}, expected (C, {img_shape[0]}, {img_shape[1]})")
 
         num_channels = img.shape[0]
+        original_height, original_width = img_shape
+
+        # --- Stage 1 Resize based on scale_factor (before normalization and transform) ---
+        if self.scale_factor != 1.0:
+            target_h = int(original_height * self.scale_factor)
+            target_w = int(original_width * self.scale_factor)
+            # Resize image (C, H, W) -> (H, W, C) -> resize -> (C, H, W)
+            img_hwc = img.transpose((1, 2, 0))
+            img_resized_hwc = cv2.resize(img_hwc, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            # Handle case where resize might remove channel dim if C=1
+            if img_resized_hwc.ndim == 2:
+                img_resized_hwc = np.expand_dims(img_resized_hwc, axis=-1)
+            img = img_resized_hwc.transpose((2, 0, 1))
+            # Update img_shape for subsequent mask generation
+            img_shape = (target_h, target_w)
 
         # Normalize each band
         if self.mean is not None and self.std is not None:
@@ -291,7 +306,20 @@ class FieldSegmentationDataset(Dataset):
                              f"Field={field_mask.shape}, Edge={edge_mask.shape}, Contact={contact_mask.shape}, Expected={img_shape}")
 
         # Scale masks to 0/255 as required
-        mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8) * 255 # Shape: (3, H, W)
+        mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8) # Shape: (3, H, W), before scaling to 255
+
+        # --- Resize masks based on scale_factor (before transform) ---
+        if self.scale_factor != 1.0:
+            target_h, target_w = img_shape # Use the updated img_shape after image resize
+            # Resize each mask channel (H, W) -> resize -> (target_H, target_W)
+            resized_mask_channels = []
+            for i in range(mask.shape[0]):
+                 resized_ch = cv2.resize(mask[i], (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+                 resized_mask_channels.append(resized_ch)
+            mask = np.stack(resized_mask_channels, axis=0) # Shape: (3, target_H, target_W)
+
+        # Scale mask to 0-255 AFTER potential resizing
+        mask = mask * 255
 
         # Apply transformations (e.g., Albumentations)
         if self.transform:
@@ -318,26 +346,26 @@ class FieldSegmentationDataset(Dataset):
                     # マスクの形状を確認し、必要に応じてCHW形式に変換
                     # print(f"Before conversion - mask shape: {mask.shape}, type: {mask.dtype}")
                     if mask.ndim == 3 and mask.shape[0] != 3 and mask.shape[2] == 3:  # HWC形式の場合
-                        print(f"Converting mask from HWC to CHW format: {mask.shape}")
+                        # print(f"Converting mask from HWC to CHW format: {mask.shape}")
                         mask = mask.permute(2, 0, 1)  # HWC -> CHW
-                        print(f"After permute - mask shape: {mask.shape}")
+                        # print(f"After permute - mask shape: {mask.shape}")
                     mask = mask.to(torch.uint8)  # テンソルの場合はto()を使用
-                    print(f"Final mask shape: {mask.shape}, type: {mask.dtype}")
+                    # print(f"Final mask shape: {mask.shape}, type: {mask.dtype}")
                 else:
-                    print(f"Mask is NumPy array with shape: {mask.shape}, type: {mask.dtype}")
+                    # print(f"Mask is NumPy array with shape: {mask.shape}, type: {mask.dtype}")
                     mask = mask.astype(np.uint8)  # NumPy配列の場合はastype()を使用
                 
                 if isinstance(img, torch.Tensor):
                     # 画像の形状を確認し、必要に応じてCHW形式に変換
-                    print(f"Before conversion - image shape: {img.shape}, type: {img.dtype}")
+                    # print(f"Before conversion - image shape: {img.shape}, type: {img.dtype}")
                     if img.ndim == 3 and img.shape[0] != 12 and img.shape[2] == 12:  # HWC形式の場合
-                        print(f"Converting image from HWC to CHW format: {img.shape}")
+                        # print(f"Converting image from HWC to CHW format: {img.shape}")
                         img = img.permute(2, 0, 1)  # HWC -> CHW
-                        print(f"After permute - image shape: {img.shape}")
+                        # print(f"After permute - image shape: {img.shape}")
                     img = img.to(torch.float32)  # テンソルの場合はto()を使用
-                    print(f"Final image shape: {img.shape}, type: {img.dtype}")
+                    # print(f"Final image shape: {img.shape}, type: {img.dtype}")
                 else:
-                    print(f"Image is NumPy array with shape: {img.shape}, type: {img.dtype}")
+                    # print(f"Image is NumPy array with shape: {img.shape}, type: {img.dtype}")
                     img = img.astype(np.float32)  # NumPy配列の場合はastype()を使用
 
             except Exception as e:

@@ -43,8 +43,8 @@ def train_model(model, dataloader, num_epochs=10, device='cuda'):
         print("CUDA not available, switching to CPU.")
         device = 'cpu'
     model.to(device)
-    # Use BCEWithLogitsLoss for multi-label segmentation (each channel independently)
-    criterion = nn.BCEWithLogitsLoss()
+    # Use BCEWithLogitsLoss with reduction='none' to calculate per-element loss
+    criterion = nn.BCEWithLogitsLoss(reduction='none')
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
     print(f"Starting training on {device} for {num_epochs} epochs...")
@@ -59,8 +59,8 @@ def train_model(model, dataloader, num_epochs=10, device='cuda'):
                 continue
             imgs, masks = batch
 
-            # バッチの形状をログに出力
-            print(f"Batch shapes - imgs: {imgs.shape}, masks: {masks.shape}")
+            # # バッチの形状をログに出力
+            # print(f"Batch shapes - imgs: {imgs.shape}, masks: {masks.shape}")
 
             # Ensure masks are FloatTensor for BCEWithLogitsLoss and scale to 0.0-1.0
             # Dataset now returns uint8 [0, 255], convert to float [0.0, 1.0]
@@ -76,9 +76,9 @@ def train_model(model, dataloader, num_epochs=10, device='cuda'):
             outputs = model(imgs)
             print("-----------------")
             
-            # モデルの出力形状とマスクの形状を損失計算直前に再度確認
-            print(f"[Before Loss] Model output shape: {outputs.shape}, dtype: {outputs.dtype}")
-            print(f"[Before Loss] Masks shape: {masks.shape}, dtype: {masks.dtype}")
+            # # モデルの出力形状とマスクの形状を損失計算直前に再度確認
+            # print(f"[Before Loss] Model output shape: {outputs.shape}, dtype: {outputs.dtype}")
+            # print(f"[Before Loss] Masks shape: {masks.shape}, dtype: {masks.dtype}")
 
             # Ensure output and target shapes match for BCEWithLogitsLoss: (N, C, H, W)
             # Check spatial dimensions explicitly
@@ -91,17 +91,31 @@ def train_model(model, dataloader, num_epochs=10, device='cuda'):
                  print(f"Error: Channel dimensions mismatch! Output: {outputs.shape[1]}, Mask: {masks.shape[1]}")
                  raise ValueError(f"Channel dimension mismatch between model output {outputs.shape} and mask {masks.shape}")
 
-            loss = criterion(outputs, masks)
+            # Calculate per-element loss
+            pixel_losses = criterion(outputs, masks) # Shape: (N, C, H, W)
 
-            # Backward pass and optimize
-            loss.backward()
+            # Calculate mean loss per channel (class)
+            loss_field = pixel_losses[:, 0, :, :].mean()
+            loss_edge = pixel_losses[:, 1, :, :].mean()
+            loss_contact = pixel_losses[:, 2, :, :].mean()
+
+            # Calculate the overall mean loss for backpropagation
+            total_loss = pixel_losses.mean()
+
+            # Backward pass and optimize using the total loss
+            total_loss.backward()
             optimizer.step()
 
-            running_loss += loss.item()
-            progress_bar.set_postfix(loss=loss.item())
+            running_loss += total_loss.item()
+            progress_bar.set_postfix(loss=total_loss.item(), field=loss_field.item(), edge=loss_edge.item(), contact=loss_contact.item())
 
         avg_loss = running_loss / len(dataloader)
-        print(f"Epoch {epoch+1} Loss: {avg_loss:.4f}")
+        # Calculate average losses for the epoch (optional, for cleaner logging)
+        # Note: This requires storing per-class losses per batch and averaging at the end
+        # For simplicity, the progress bar already shows the last batch's per-class loss.
+        # We print the average total loss here.
+        print(f"Epoch {epoch+1} Average Total Loss: {avg_loss:.4f}")
+        # You could add more detailed logging here if needed, e.g., average per-class loss for the epoch
 
     print("Training finished.")
 
@@ -121,9 +135,9 @@ if __name__ == "__main__":
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     INPUT_H = 512 # Original image height (example)
     INPUT_W = 512 # Original image width (example)
-    SCALE_FACTOR = 2 # Resize scale factor from requirements
-    RESIZE_H = INPUT_H * SCALE_FACTOR
-    RESIZE_W = INPUT_W * SCALE_FACTOR
+    SCALE_FACTOR = 3 # Resize scale factor from requirements
+    RESIZE_H = 1024
+    RESIZE_W = 1024
     # Pre-calculated mean/std (Example values - REPLACE WITH YOUR ACTUAL VALUES)
     # These should be calculated across your entire training dataset for all 12 channels
     # Example: DATASET_MEAN = [0.1, 0.1, ..., 0.1] # List of 12 means
@@ -139,7 +153,6 @@ if __name__ == "__main__":
     # MaxViTモデルは入力サイズが16の倍数である必要があるため、それに合わせて調整
     # 各画像のサイズは異なるため、PadIfNeededを使用して16の倍数にパディング
     transform = A.Compose([
-        # まず指定サイズにリサイズ
         A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_LINEAR),
         # 16の倍数になるようにパディング（min_heightとmin_widthは16の倍数に切り上げ）
         # A.PadIfNeeded(
@@ -161,6 +174,7 @@ if __name__ == "__main__":
         dataset = FieldSegmentationDataset(
             img_dir=IMAGE_DIR,
             ann_json_path=ANNOTATION_FILE, # Corrected parameter name
+            scale_factor=SCALE_FACTOR,     # Pass scale_factor
             transform=transform,
             mean=DATASET_MEAN, # Pass pre-calculated mean
             std=DATASET_STD   # Pass pre-calculated std

@@ -224,6 +224,8 @@ class FieldSegmentationDataset(Dataset):
 
         # 1. Field mask (footprint)
         field_mask = (labels > 0).astype(np.uint8)
+        # field_maskをpng形式で保存する場合
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/mask_{img_path.split('/')[-1].replace('.tif','')}.png', field_mask * 255)  # Save field mask as PNG (0-255)
 
         # 2. Edge mask
         edge_mask = np.zeros(img_shape, dtype=np.uint8)
@@ -239,6 +241,7 @@ class FieldSegmentationDataset(Dataset):
                     except Exception as e:
                         print(f"Warning: Error during edge erosion for instance {i} in {img_filename}: {e}")
                         # Continue processing other instances/masks
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/edge_{img_path.split('/')[-1].replace(".tif","")}.png', edge_mask * 255)  # Save edge mask as PNG (0-255)
 
         # 3. Contact mask
         contact_mask = np.zeros(img_shape, dtype=np.uint8)
@@ -278,6 +281,7 @@ class FieldSegmentationDataset(Dataset):
             except Exception as e:
                 print(f"Warning: Error during contact mask generation for {img_filename}: {e}")
                 # contact_mask remains zeros if an error occurs
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/contact_{img_path.split("/")[-1].replace(".tif","")}.png', contact_mask * 255)  # Save contact mask as PNG (0-255)
 
         # Stack masks: (C, H, W) format for PyTorch
         # Ensure all masks have the same shape before stacking

@@ -115,13 +115,13 @@ if __name__ == "__main__":
     BACKBONE = 'maxvit_small_tf_512.in1k' # Example backbone
     NUM_OUTPUT_CHANNELS = 3 # Number of output channels (field, edge, contact)
     PRETRAINED = True
-    BATCH_SIZE = 4 # Adjust based on GPU memory
+    BATCH_SIZE = 1 # Adjust based on GPU memory
     NUM_WORKERS = 4 # Adjust based on CPU cores
     NUM_EPOCHS = 2 # Number of training epochs
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     INPUT_H = 512 # Original image height (example)
     INPUT_W = 512 # Original image width (example)
-    SCALE_FACTOR = 1 # Resize scale factor from requirements
+    SCALE_FACTOR = 2 # Resize scale factor from requirements
     RESIZE_H = INPUT_H * SCALE_FACTOR
     RESIZE_W = INPUT_W * SCALE_FACTOR
     # Pre-calculated mean/std (Example values - REPLACE WITH YOUR ACTUAL VALUES)
@@ -142,13 +142,14 @@ if __name__ == "__main__":
         # まず指定サイズにリサイズ
         A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_LINEAR),
         # 16の倍数になるようにパディング（min_heightとmin_widthは16の倍数に切り上げ）
-        A.PadIfNeeded(
-            min_height=16 * ((RESIZE_H + 15) // 16),
-            min_width=16 * ((RESIZE_W + 15) // 16),
-            border_mode=cv2.BORDER_CONSTANT
-        ),
+        # A.PadIfNeeded(
+        #     min_height=16 * ((RESIZE_H + 15) // 16),
+        #     min_width=16 * ((RESIZE_W + 15) // 16),
+        #     border_mode=cv2.BORDER_CONSTANT
+        # ),
         # Add other augmentations here if needed (e.g., Flip, Rotate)
-        # A.HorizontalFlip(p=0.5),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
         ToTensorV2(), # Converts image HWC->CHW, mask HWC->CHW, scales image 0-255 -> 0-1 (mask remains 0 or 255 uint8)
     ])
     

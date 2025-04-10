@@ -39,7 +39,7 @@ def inference(model_path, image_path, output_path, device='cuda'):
     # --- Configuration ---
     INPUT_H = 512 # Original image height (example)
     INPUT_W = 512 # Original image width (example)
-    SCALE_FACTOR = 1 # Resize scale factor from requirements
+    SCALE_FACTOR = 2 # Resize scale factor from requirements
     RESIZE_H = INPUT_H * SCALE_FACTOR
     RESIZE_W = INPUT_W * SCALE_FACTOR
     # ---------------------
@@ -81,11 +81,11 @@ def inference(model_path, image_path, output_path, device='cuda'):
         # まず指定サイズにリサイズ
         A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_LINEAR),
         # 16の倍数になるようにパディング（min_heightとmin_widthは16の倍数に切り上げ）
-        A.PadIfNeeded(
-            min_height=16 * ((RESIZE_H + 15) // 16),
-            min_width=16 * ((RESIZE_W + 15) // 16),
-            border_mode=cv2.BORDER_CONSTANT
-        ),
+        # A.PadIfNeeded(
+        #     min_height=16 * ((RESIZE_H + 15) // 16),
+        #     min_width=16 * ((RESIZE_W + 15) // 16),
+        #     border_mode=cv2.BORDER_CONSTANT
+        # ),
         # Add other augmentations here if needed (e.g., Flip, Rotate)
         # A.HorizontalFlip(p=0.5),
         ToTensorV2(), # Converts image HWC->CHW, mask HWC->CHW, scales image 0-255 -> 0-1 (mask remains 0 or 255 uint8)
@@ -126,14 +126,19 @@ def inference(model_path, image_path, output_path, device='cuda'):
     try:
         # Ensure mask is uint8 for saving
         cv2.imwrite(output_path, (mask * 255).astype(np.uint8))
+        # クラスごとのマスクを保存する場合
+        for i in range(mask.shape[2]):
+            cv2.imwrite(f"{output_path}_class_{i}.png", (mask[:, :, i] * 255).astype(np.uint8))
+        print(f"Output mask saved to {output_path}")
     except Exception as e:
         print(f"Error saving the output mask to {output_path}: {e}")
 
 if __name__ == "__main__":
     # Example usage:
     model_path = '../outputs/ex0/model.path'  # Path to your trained model
-    image_path = '/workspace/projects/solafune-field-area-segmentation/data/train_images/train_0.tif'  # Path to your test image
-    output_path = '/workspace/projects/solafune-field-area-segmentation/outputs/ex0/output.png'  # Path to save the segmentation result
+    image_path = '/workspace/projects/solafune-field-area-segmentation/data/test_images/test_0.tif'  # Path to your test image
+    # image_path = '/workspace/projects/solafune-field-area-segmentation/data/train_images/train_0.tif'  # Path to your test image
+    output_path = f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/output_images/{image_path.split('/')[-1].replace('.tif','')}.png'  # Path to save the segmentation result
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     inference(model_path, image_path, output_path, device)

@@ -8,7 +8,7 @@ from tqdm import tqdm
 import numpy as np
 import cv2 # Import OpenCV
 import os
-
+import rasterio
 from torchsummary import summary
 
 
@@ -131,11 +131,11 @@ if __name__ == "__main__":
     PRETRAINED = True
     BATCH_SIZE = 1 # Adjust based on GPU memory
     NUM_WORKERS = 4 # Adjust based on CPU cores
-    NUM_EPOCHS = 2 # Number of training epochs
+    NUM_EPOCHS = 100 # Number of training epochs
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     INPUT_H = 512 # Original image height (example)
     INPUT_W = 512 # Original image width (example)
-    SCALE_FACTOR = 3 # Resize scale factor from requirements
+    SCALE_FACTOR = 1 # Resize scale factor from requirements
     RESIZE_H = 1024
     RESIZE_W = 1024
     # Pre-calculated mean/std (Example values - REPLACE WITH YOUR ACTUAL VALUES)
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     # MaxViTモデルは入力サイズが16の倍数である必要があるため、それに合わせて調整
     # 各画像のサイズは異なるため、PadIfNeededを使用して16の倍数にパディング
     transform = A.Compose([
-        A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_LINEAR),
+        A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST),
         # 16の倍数になるようにパディング（min_heightとmin_widthは16の倍数に切り上げ）
         # A.PadIfNeeded(
         #     min_height=16 * ((RESIZE_H + 15) // 16),
@@ -161,8 +161,8 @@ if __name__ == "__main__":
         #     border_mode=cv2.BORDER_CONSTANT
         # ),
         # Add other augmentations here if needed (e.g., Flip, Rotate)
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
+        # A.HorizontalFlip(p=0.5),
+        # A.VerticalFlip(p=0.5),
         ToTensorV2(), # Converts image HWC->CHW, mask HWC->CHW, scales image 0-255 -> 0-1 (mask remains 0 or 255 uint8)
     ])
     
@@ -207,6 +207,79 @@ if __name__ == "__main__":
             print(f"Output directory {OUTPUT_DIR} already exists. Model will be saved there.")
         torch.save(model.state_dict(), os.path.join(OUTPUT_DIR,'model.path'))
         print(f"Model saved to {OUTPUT_DIR}")
+
+        # --- Inference on Training Data ---
+        print("\nStarting inference on training data...")
+        PREDICTION_DIR = os.path.join(OUTPUT_DIR, 'train_predictions')
+        if not os.path.exists(PREDICTION_DIR):
+            os.makedirs(PREDICTION_DIR)
+            print(f"Prediction directory created: {PREDICTION_DIR}")
+
+        # Use the same dataset but with batch_size=1 and shuffle=False for inference
+        # Re-create transform without random augmentations if needed, but using the same for simplicity here
+        inference_dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=NUM_WORKERS)
+
+        model.eval()  # Set model to evaluation mode
+        with torch.no_grad():
+            progress_bar_infer = tqdm(inference_dataloader, desc="Inferring on train set")
+            for i, batch in enumerate(progress_bar_infer):
+                if batch is None: continue
+                imgs, _ = batch # We don't need masks for inference
+                imgs = imgs.to(DEVICE)
+
+                # Get original image path to derive output filename and original size
+                # This assumes dataset.__getitem__ returns data in the same order as self.img_filenames
+                # It's safer to modify the dataset to return the filename or index
+                # For simplicity, we reconstruct the path based on index (less robust)
+                if i < len(dataset.img_filenames):
+                    original_img_filename = dataset.img_filenames[i]
+                    original_img_path = os.path.join(IMAGE_DIR, original_img_filename)
+                    output_filename_base = os.path.splitext(original_img_filename)[0] + "_pred.png"
+                    output_path = os.path.join(PREDICTION_DIR, output_filename_base)
+
+                    # Get original size using rasterio again (safer than relying on dataset internal state)
+                    try:
+                        with rasterio.open(original_img_path) as src:
+                            original_shape = (src.height, src.width)
+                    except Exception as e:
+                        print(f"Warning: Could not read original image {original_img_path} to get size. Skipping resize for this image. Error: {e}")
+                        original_shape = None
+
+                    # Perform inference
+                    outputs = model(imgs)
+                    outputs = torch.sigmoid(outputs)
+                    pred_masks = (outputs > 0.5).float() # Thresholding
+
+                    # Process and save mask
+                    pred_mask_np = pred_masks.squeeze(0).cpu().numpy() # (C, H, W) - Size after transform
+                    pred_mask_np = pred_mask_np.transpose((1, 2, 0)) # (H, W, C)
+
+                    # Resize mask to original image size if original_shape is available
+                    if original_shape:
+                        pred_mask_np = cv2.resize(pred_mask_np, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_NEAREST)
+                        # Ensure 3 channels after resize
+                        if pred_mask_np.ndim == 2:
+                             pred_mask_np = np.stack([pred_mask_np]*3, axis=-1)
+                        elif pred_mask_np.ndim == 3 and pred_mask_np.shape[2] == 1:
+                             pred_mask_np = np.concatenate([pred_mask_np]*3, axis=-1)
+
+                    # Save the combined mask and per-class masks
+                    try:
+                        # Save combined mask (optional, might be hard to visualize)
+                        # cv2.imwrite(output_path, (pred_mask_np * 255).astype(np.uint8))
+
+                        # Save each class mask separately
+                        for class_idx in range(pred_mask_np.shape[2]):
+                             class_output_path = os.path.join(PREDICTION_DIR, f"{os.path.splitext(output_filename_base)[0]}_class_{class_idx}.png")
+                             cv2.imwrite(class_output_path, (pred_mask_np[:, :, class_idx] * 255).astype(np.uint8))
+                        progress_bar_infer.set_postfix(saved=output_filename_base)
+                    except Exception as e:
+                        print(f"Error saving prediction for {original_img_filename}: {e}")
+                else:
+                    print(f"Warning: Index {i} out of bounds for dataset filenames.")
+
+        print(f"Training data predictions saved to {PREDICTION_DIR}")
+
 
     except NameError:
          print("Error: FieldSegmentationDataset or UNet class not found. Ensure 'src' is in PYTHONPATH or run from the project root. Cannot run training.")

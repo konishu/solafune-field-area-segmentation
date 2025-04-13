@@ -7,29 +7,32 @@ import rasterio
 import cv2
 from shapely.wkt import loads as wkt_loads
 from shapely.geometry import mapping # To convert polygon to coordinates
-from skimage.morphology import erosion, dilation, footprint_rectangle
+from skimage.morphology import erosion, dilation, footprint_rectangle # Using footprint_rectangle instead of deprecated square
+# footprint_rectangle is also fine, choose one consistently
+# from skimage.morphology import footprint_rectangle
 from skimage.segmentation import watershed
 # from skimage.measure import label as skimage_label # Not used in this implementation
 
 # Helper function to convert COCO segmentation format to mask
-def segmentation_to_mask(segmentation, shape):
-    """Converts polygon segmentation [x1, y1, x2, y2,...] to a binary mask."""
+def segmentation_to_mask(segmentation, shape, scale_factor=1.0):
+    """Converts polygon segmentation [x1, y1, x2, y2,...] to a binary mask, applying scaling."""
     mask = np.zeros(shape, dtype=np.uint8)
     # Ensure segmentation is not empty and is a list/tuple
     if not segmentation or not isinstance(segmentation, (list, tuple)):
-        print(f"Warning: Invalid segmentation data type: {type(segmentation)}")
+        # print(f"Warning: Invalid segmentation data type: {type(segmentation)}") # Reduced verbosity
         return mask
     # Ensure segmentation list has an even number of elements >= 6 for a polygon
     if len(segmentation) < 6 or len(segmentation) % 2 != 0:
-         print(f"Warning: Segmentation list has invalid number of points: {len(segmentation)}")
+         # print(f"Warning: Segmentation list has invalid number of points: {len(segmentation)}") # Reduced verbosity
          return mask
 
     try:
-        points = np.array(segmentation).reshape(-1, 2).round().astype(np.int32)
+        # Apply scale factor before rounding
+        points = (np.array(segmentation).reshape(-1, 2) * scale_factor).round().astype(np.int32)
         if points.shape[0] >= 3: # Need at least 3 points to form a polygon
             cv2.fillPoly(mask, [points], 1)
-        else:
-             print(f"Warning: Not enough points ({points.shape[0]}) to form a polygon from segmentation.")
+        # else: # Reduced verbosity
+             # print(f"Warning: Not enough points ({points.shape[0]}) to form a polygon from segmentation.")
     except Exception as e:
         print(f"Error processing segmentation points: {e}. Segmentation data: {segmentation}")
         return np.zeros(shape, dtype=np.uint8) # Return empty mask on error
@@ -38,6 +41,7 @@ def segmentation_to_mask(segmentation, shape):
 class FieldSegmentationDataset(Dataset):
     """
     PyTorch Dataset for Sentinel-2 field segmentation.
+    Includes modified contact mask generation with boundary dilation.
 
     Args:
         img_dir (str): Directory containing TIF image files.
@@ -56,70 +60,50 @@ class FieldSegmentationDataset(Dataset):
         self.contact_width = contact_width
         self.transform = transform
 
-        # Validate and reshape mean/std if provided
+        # --- (Initialization code remains the same) ---
         if mean is not None:
             self.mean = np.array(mean, dtype=np.float32)
-            if self.mean.ndim == 1:
-                self.mean = self.mean.reshape(-1, 1, 1)
-            elif self.mean.ndim != 3 or self.mean.shape[1:] != (1, 1):
-                 raise ValueError("Mean must be a 1D array or a 3D array of shape (C, 1, 1)")
-        else:
-            self.mean = None
-
+            if self.mean.ndim == 1: self.mean = self.mean.reshape(-1, 1, 1)
+            elif self.mean.ndim != 3 or self.mean.shape[1:] != (1, 1): raise ValueError("Mean shape error")
+        else: self.mean = None
         if std is not None:
             self.std = np.array(std, dtype=np.float32)
-            if self.std.ndim == 1:
-                self.std = self.std.reshape(-1, 1, 1)
-            elif self.std.ndim != 3 or self.std.shape[1:] != (1, 1):
-                 raise ValueError("Std must be a 1D array or a 3D array of shape (C, 1, 1)")
-        else:
-            self.std = None
+            if self.std.ndim == 1: self.std = self.std.reshape(-1, 1, 1)
+            elif self.std.ndim != 3 or self.std.shape[1:] != (1, 1): raise ValueError("Std shape error")
+        else: self.std = None
+        if (self.mean is None) != (self.std is None):
+            print("Warning: Provide both mean and std, or neither. Falling back.")
+            self.mean, self.std = None, None
 
-        if self.mean is not None and self.std is None or self.mean is None and self.std is not None:
-            print("Warning: Both mean and std must be provided for pre-calculated normalization. Falling back to per-image normalization.")
-            self.mean = None
-            self.std = None
-
-        # print(f"Loading annotations from {ann_json_path}...")
         try:
-            with open(ann_json_path, 'r') as f:
-                ann_data = json.load(f)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Annotation file not found: {ann_json_path}")
-        except json.JSONDecodeError:
-            raise ValueError(f"Error decoding JSON from {ann_json_path}")
+            with open(ann_json_path, 'r') as f: ann_data = json.load(f)
+        except Exception as e: raise IOError(f"Error reading annotation file {ann_json_path}: {e}") from e
 
-        # Validate basic structure
         if 'images' not in ann_data or not isinstance(ann_data['images'], list):
-            raise ValueError(f"Invalid annotation format: 'images' key missing or not a list in {ann_json_path}")
+            raise ValueError(f"Invalid annotation format in {ann_json_path}")
 
         self.annotations = {}
-        for item in ann_data['images']:
+        for item in ann_data.get('images', []): # Use .get for safety
              if isinstance(item, dict) and 'file_name' in item and 'annotations' in item:
-                  # Ensure annotations is a list
                   if isinstance(item['annotations'], list):
                       self.annotations[item['file_name']] = item['annotations']
-                  else:
-                      print(f"Warning: Skipping image {item['file_name']} due to invalid 'annotations' type (expected list).")
-             else:
-                  print(f"Warning: Skipping invalid image entry in annotations: {item}")
+                  # else: # Reduced verbosity
+                      # print(f"Warning: Skipping {item['file_name']}, invalid annotations type.")
+             # else: # Reduced verbosity
+                 # print(f"Warning: Skipping invalid image entry: {item}")
 
-        # List images in img_dir and filter by those present in annotations
         try:
             all_files = os.listdir(img_dir)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Image directory not found: {img_dir}")
+        except FileNotFoundError: raise FileNotFoundError(f"Image directory not found: {img_dir}")
 
         self.img_filenames = sorted([
             fn for fn in all_files
             if fn.endswith('.tif') and fn in self.annotations
         ])
-        print(f"Found {len(self.img_filenames)} images in {img_dir} with corresponding annotations.")
-
+        print(f"Found {len(self.img_filenames)} images in {img_dir} with annotations.")
         if not self.img_filenames:
-             print(f"Warning: No matching .tif files found in {img_dir} that are listed in {ann_json_path}")
-             # Depending on use case, might want to raise error or allow empty dataset
-             # raise ValueError(f"No matching image files found in {img_dir} for annotations in {ann_json_path}")
+             print(f"Warning: No matching .tif files found in {img_dir} listed in {ann_json_path}")
+        # --- (End of Initialization code) ---
 
     def __len__(self):
         return len(self.img_filenames)
@@ -134,156 +118,131 @@ class FieldSegmentationDataset(Dataset):
         # Load 12-band image
         try:
             with rasterio.open(img_path) as src:
-                # Check channel count if needed, but proceed anyway
-                # num_channels_actual = src.count
-                # if self.mean is not None and num_channels_actual != self.mean.shape[0]:
-                #     print(f"Warning: Image {img_filename} has {num_channels_actual} channels, but mean/std provided for {self.mean.shape[0]} channels.")
                 img = src.read().astype(np.float32) # (C, H, W)
                 img_shape = (src.height, src.width)
-        except rasterio.RasterioIOError as e:
+        except Exception as e:
             print(f"Error loading image {img_path}: {e}")
-            # Handle error: return None, skip, or raise. Raising is safer for training loop stability.
-            raise IOError(f"Could not read image file {img_path}") from e
-        except Exception as e: # Catch other potential errors during file access/read
-            print(f"Unexpected error loading image {img_path}: {e}")
             raise IOError(f"Could not read image file {img_path}") from e
 
-        # Ensure image has 3 dimensions (C, H, W)
-        if img.ndim != 3 or img.shape[1] != img_shape[0] or img.shape[2] != img_shape[1]:
-            raise ValueError(f"Image loaded from {img_path} has unexpected shape: {img.shape}, expected (C, {img_shape[0]}, {img_shape[1]})")
+        if img.ndim != 3 or img.shape[1:] != img_shape:
+             raise ValueError(f"Image {img_path} has unexpected shape: {img.shape}, expected (C, {img_shape[0]}, {img_shape[1]})")
 
         num_channels = img.shape[0]
         original_height, original_width = img_shape
 
-        # --- Stage 1 Resize based on scale_factor (before normalization and transform) ---
+        # --- Stage 1 Resize based on scale_factor ---
         if self.scale_factor != 1.0:
             target_h = int(original_height * self.scale_factor)
             target_w = int(original_width * self.scale_factor)
-            # Resize image (C, H, W) -> (H, W, C) -> resize -> (C, H, W)
             img_hwc = img.transpose((1, 2, 0))
             img_resized_hwc = cv2.resize(img_hwc, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-            # Handle case where resize might remove channel dim if C=1
-            if img_resized_hwc.ndim == 2:
-                img_resized_hwc = np.expand_dims(img_resized_hwc, axis=-1)
+            if img_resized_hwc.ndim == 2: img_resized_hwc = np.expand_dims(img_resized_hwc, axis=-1)
             img = img_resized_hwc.transpose((2, 0, 1))
-            # Update img_shape for subsequent mask generation
-            img_shape = (target_h, target_w)
+            img_shape = (target_h, target_w) # Update shape for masks
 
-        # Normalize each band
+        # --- Normalize image ---
         if self.mean is not None and self.std is not None:
             if self.mean.shape[0] != num_channels or self.std.shape[0] != num_channels:
-                 # This case should ideally be caught during init or file listing if possible,
-                 # but double-check here.
-                 raise ValueError(f"Pre-calculated mean/std channel count ({self.mean.shape[0]}) doesn't match image channels ({num_channels}) for {img_filename}")
-            # Mean/std should already be shaped (C, 1, 1) from __init__
+                 raise ValueError(f"Mean/std channel mismatch for {img_filename}")
             img = (img - self.mean) / (self.std + 1e-6)
         else:
-            # Per-image normalization (fallback)
             img_mean = img.mean(axis=(1, 2), keepdims=True)
             img_std = img.std(axis=(1, 2), keepdims=True)
-            # Add epsilon to std to avoid division by zero
             img = (img - img_mean) / (img_std + 1e-6)
 
         # --- Mask Generation ---
-        img_annotations = self.annotations.get(img_filename, []) # Use .get for safety
-        labels = np.zeros(img_shape, dtype=np.uint16) # Use uint16 for potentially many instances
+        img_annotations = self.annotations.get(img_filename, [])
+        labels = np.zeros(img_shape, dtype=np.uint16)
         instance_id = 0
-        valid_polygons_found = False
+        # --- (Instance Label Map Generation - same as before) ---
         for ann in img_annotations:
-            # Check if annotation is a dict and has required keys
-            if not isinstance(ann, dict) or 'class' not in ann or 'segmentation' not in ann:
-                print(f"Warning: Skipping invalid annotation structure in {img_filename}: {ann}")
-                continue
-
+            if not isinstance(ann, dict) or 'class' not in ann or 'segmentation' not in ann: continue
             if ann['class'] == 'field' and ann['segmentation']:
                 poly_mask = np.zeros(img_shape, dtype=np.uint8)
                 try:
-                    if isinstance(ann['segmentation'], str): # Assume WKT string
+                    # --- WKT/COCO Polygon Processing (same as before) ---
+                    if isinstance(ann['segmentation'], str): # WKT
                         polygon = wkt_loads(ann['segmentation'])
-                        # Handle MultiPolygon as well, iterate through geometries
+                        coords_list = []
                         if polygon.geom_type == 'MultiPolygon':
-                            all_coords = []
                             for poly in polygon.geoms:
-                                coords = np.array(mapping(poly)['coordinates'][0]).round().astype(np.int32) # Get exterior coords
-                                if coords.shape[0] >= 3:
-                                    all_coords.append(coords)
-                            if all_coords:
-                                cv2.fillPoly(poly_mask, all_coords, 1)
+                                coords = np.array(mapping(poly)['coordinates'][0]).round().astype(np.int32)
+                                if coords.shape[0] >= 3: coords_list.append(coords)
                         elif polygon.geom_type == 'Polygon':
-                             coords = np.array(mapping(polygon)['coordinates'][0]).round().astype(np.int32) # Get exterior coords
-                             if coords.shape[0] >= 3:
-                                 cv2.fillPoly(poly_mask, [coords], 1)
-                        else:
-                            print(f"Warning: Unsupported geometry type '{polygon.geom_type}' in WKT for {img_filename}")
-
-                    elif isinstance(ann['segmentation'], (list, tuple)): # Handle COCO list format as fallback
-                         # Use existing helper, but ensure it returns 0/1
-                         temp_mask = segmentation_to_mask(ann['segmentation'], img_shape)
-                         poly_mask[temp_mask > 0] = 1 # Ensure 0/1 output
-                    else:
-                         print(f"Warning: Unsupported segmentation format for annotation in {img_filename}: {type(ann['segmentation'])}")
-
-                    if np.any(poly_mask): # Only assign label if mask is not empty
-                        instance_id += 1 # Increment ID only for valid, non-empty polygons
-                        # Assign unique ID only where the current polygon mask is 1 AND no previous label exists
-                        # This prevents overwriting labels if polygons overlap slightly after rasterization
+                             coords = np.array(mapping(polygon)['coordinates'][0]).round().astype(np.int32)
+                             if coords.shape[0] >= 3: coords_list.append(coords)
+                        if coords_list: cv2.fillPoly(poly_mask, coords_list, 1)
+                    elif isinstance(ann['segmentation'], (list, tuple)): # COCO list
+                         # Pass the scale_factor from the dataset instance
+                         temp_mask = segmentation_to_mask(ann['segmentation'], img_shape, self.scale_factor)
+                         poly_mask[temp_mask > 0] = 1
+                    # --- End WKT/COCO ---
+                    if np.any(poly_mask):
+                        instance_id += 1
                         labels[(poly_mask > 0) & (labels == 0)] = instance_id
-                        valid_polygons_found = True
                 except Exception as e:
-                    print(f"Error processing WKT/segmentation for annotation in {img_filename}: {e}. Data: {ann['segmentation']}")
-                # else: poly_mask is empty or error occurred, don't assign label or increment id
-
-        # If no valid polygons were found for this image, masks will be all zeros.
-        # if not valid_polygons_found:
-        #     print(f"Warning: No valid 'field' polygons found for {img_filename}. Proceeding with empty masks.")
+                    print(f"Error processing annotation for {img_filename}: {e}. Data: {ann.get('segmentation', 'N/A')}") # Use .get for safety
+        # --- (End Instance Label Map Generation) ---
 
         # 1. Field mask (footprint)
         field_mask = (labels > 0).astype(np.uint8)
-        # field_maskをpng形式で保存する場合
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/mask_{img_path.split('/')[-1].replace('.tif','')}.png', field_mask * 255)  # Save field mask as PNG (0-255)
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/field_{img_path.split("/")[-1].replace(".tif","")}.png', field_mask * 255)  # Save field mask as PNG (0-255)
 
         # 2. Edge mask
         edge_mask = np.zeros(img_shape, dtype=np.uint8)
-        if self.edge_width > 0 and instance_id > 0: # Check instance_id > 0 (actual number of instances)
+        if self.edge_width > 0 and instance_id > 0:
+            # Use square kernel for consistency with process_image logic if desired
             selem_edge = footprint_rectangle((self.edge_width, self.edge_width))
-            for i in range(1, instance_id + 1): # Iterate up to the actual number of instances processed
+            # Or use footprint_rectangle as before:
+            # from skimage.morphology import footprint_rectangle
+            # selem_edge = footprint_rectangle((self.edge_width, self.edge_width))
+            for i in range(1, instance_id + 1):
                 instance_mask = (labels == i)
-                if np.any(instance_mask): # Check if the instance exists and is not empty
+                if np.any(instance_mask):
                     try:
                         eroded_mask = erosion(instance_mask, selem_edge)
-                        edge = instance_mask ^ eroded_mask
-                        edge_mask[edge] = 1
+                        edge = instance_mask ^ eroded_mask # XOR
+                        edge_mask[edge] = 1 # Accumulate edges
                     except Exception as e:
                         print(f"Warning: Error during edge erosion for instance {i} in {img_filename}: {e}")
-                        # Continue processing other instances/masks
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/edge_{img_path.split('/')[-1].replace(".tif","")}.png', edge_mask * 255)  # Save edge mask as PNG (0-255)
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/edge_{img_path.split('/')[-1].replace(".tif","")}.png', edge_mask * 255)  # Save edge mask as PNG (0-255)
 
-        # 3. Contact mask
+        # 3. Contact mask (Modified Logic)
         contact_mask = np.zeros(img_shape, dtype=np.uint8)
-        # Need at least 2 actual instances processed for contact
-        if self.contact_width > 0 and instance_id > 1:
+        if self.contact_width > 0 and instance_id > 1: # Need >= 2 instances
+            # Use square kernel for consistency if edge_mask used square
             selem_contact = footprint_rectangle((self.contact_width, self.contact_width))
+            # Or use footprint_rectangle as before:
+            # from skimage.morphology import footprint_rectangle
+            # selem_contact = footprint_rectangle((self.contact_width, self.contact_width))
             try:
-                # Dilate the field mask to find potential contact zones
+                # Dilate the field mask
                 dilated_field = dilation(field_mask, selem_contact)
 
-                # Use watershed to separate close objects based on instance labels
-                # Ensure labels don't have 0 where dilated_field is True, watershed needs markers > 0
+                # Prepare markers for watershed
                 markers = labels.copy()
                 markers[~dilated_field] = 0 # Clear markers outside dilated area
 
-                # Watershed segmentation. watershed_line=True marks boundaries between labels.
-                # The mask=dilated_field ensures watershed only runs within the dilated area.
-                # Handle potential errors during watershed
+                # Run watershed
                 ws_labels = watershed(dilated_field, markers, mask=dilated_field, watershed_line=True)
 
-                # Watershed lines are marked as 0 in ws_labels.
-                # Contact points are where the watershed line exists AND it separates different original labels.
-                watershed_lines = (ws_labels == 0) & dilated_field
+                # Identify watershed lines (potential boundaries)
+                watershed_lines = (ws_labels == 0) & dilated_field # Boolean mask
 
-                # Refine: Check neighbors around watershed lines in the original labels
-                contact_mask_candidates = watershed_lines
-                coords = np.argwhere(contact_mask_candidates)
+                # >>> MODIFICATION START <<<
+                # Combine watershed lines with edge mask
+                # Ensure edge_mask is boolean for bitwise OR
+                combined_boundaries = watershed_lines | (edge_mask > 0)
+
+                # Dilate the combined boundaries
+                dilated_boundaries = dilation(combined_boundaries, selem_contact)
+
+                # Use the dilated boundaries as candidates for contact points
+                contact_mask_candidates = dilated_boundaries
+                # >>> MODIFICATION END <<<
+
+                # Verify candidates by checking neighbors in the original labels map
+                coords = np.argwhere(contact_mask_candidates) # Use the new candidates
                 for y, x in coords:
                      # Check 3x3 neighborhood in original labels
                      y_min, y_max = max(0, y - 1), min(img_shape[0], y + 2)
@@ -291,115 +250,103 @@ class FieldSegmentationDataset(Dataset):
                      neighborhood = labels[y_min:y_max, x_min:x_max]
                      # Get unique non-zero labels in the neighborhood
                      unique_labels_in_neighborhood = np.unique(neighborhood[neighborhood > 0])
+                     # If more than one unique label exists, it's a contact point
                      if len(unique_labels_in_neighborhood) > 1:
                          contact_mask[y, x] = 1
             except Exception as e:
                 print(f"Warning: Error during contact mask generation for {img_filename}: {e}")
                 # contact_mask remains zeros if an error occurs
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/contact_{img_path.split("/")[-1].replace(".tif","")}.png', contact_mask * 255)  # Save contact mask as PNG (0-255)
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/contact_{img_path.split("/")[-1].replace(".tif","")}.png', contact_mask * 255)  # Save contact mask as PNG (0-255)
 
-        # Stack masks: (C, H, W) format for PyTorch
-        # Ensure all masks have the same shape before stacking
+        # --- Stack and finalize masks ---
         if not (field_mask.shape == edge_mask.shape == contact_mask.shape == img_shape):
-            # This should not happen if logic is correct, but check for safety
-            raise ValueError(f"Mask shape mismatch for {img_filename}: "
-                             f"Field={field_mask.shape}, Edge={edge_mask.shape}, Contact={contact_mask.shape}, Expected={img_shape}")
+            raise ValueError(f"Mask shape mismatch for {img_filename}")
 
-        # Scale masks to 0/255 as required
-        mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8) # Shape: (3, H, W), before scaling to 255
+        # Stack masks: (3, H, W)
+        mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8)
+        # 3クラスのマスクを作成 (0: 背景, 1: field, 2: contact, 3: edge)し、red, blue, greenにして保存
+        mask_ = np.stack([field_mask, contact_mask, edge_mask], axis=0).astype(np.uint8) # (3, H, W)
+        # Save the combined mask as PNG (0-255)
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/train_{img_path.split("/")[-1].replace(".tif","")}.png', mask_.transpose((1, 2, 0)) * 255)  # Save combined mask as PNG (0-255)
 
-        # --- Resize masks based on scale_factor (before transform) ---
+        # --- Resize masks if image was resized (using updated img_shape) ---
         if self.scale_factor != 1.0:
-            target_h, target_w = img_shape # Use the updated img_shape after image resize
-            # Resize each mask channel (H, W) -> resize -> (target_H, target_W)
+            target_h, target_w = img_shape # Already updated
             resized_mask_channels = []
             for i in range(mask.shape[0]):
+                 # Use INTER_NEAREST for masks to preserve 0/1 values
                  resized_ch = cv2.resize(mask[i], (target_w, target_h), interpolation=cv2.INTER_NEAREST)
                  resized_mask_channels.append(resized_ch)
-            mask = np.stack(resized_mask_channels, axis=0) # Shape: (3, target_H, target_W)
+            mask = np.stack(resized_mask_channels, axis=0)
 
-        # Scale mask to 0-255 AFTER potential resizing
+        # Scale mask values to 0-255 AFTER potential resizing
         mask = mask * 255
 
-        # Apply transformations (e.g., Albumentations)
+        # --- Apply transformations ---
         if self.transform:
             try:
-                # print(f"Applying transformations for {img_filename}...")
-                # Albumentations expects image: (H, W, C), mask: (H, W, C) or (H, W, N)
-                img_for_transform = img.transpose((1, 2, 0)) # (H, W, C) - NumPyスタイルの転置
-                mask_for_transform = mask.transpose((1, 2, 0)) # (H, W, 3) - NumPyスタイルの転置
-                # print(f"Input shapes for transform: image={img_for_transform.shape}, mask={mask_for_transform.shape}")
+                img_for_transform = img.transpose((1, 2, 0)) # HWC for Albumentations
+                mask_for_transform = mask.transpose((1, 2, 0)) # HWC for Albumentations
+
                 augmented = self.transform(image=img_for_transform, mask=mask_for_transform)
 
-                img = augmented['image'] # Already (C, H, W) tensor from ToTensorV2
-                mask = augmented['mask'] # Already (C, H, W) tensor from ToTensorV2
+                img = augmented['image'] # Expecting Tensor CHW from ToTensorV2
+                mask = augmented['mask'] # Expecting Tensor CHW from ToTensorV2
 
-                # # 変換後のサイズをログに出力して確認
-                # print(f"After transform: image shape={img.shape}, mask shape={mask.shape}")
-                # 16の倍数かどうかを確認
-                if img.shape[1] % 16 != 0 or img.shape[2] % 16 != 0:
-                    print(f"Warning: Transformed image dimensions ({img.shape[1]}x{img.shape[2]}) are not divisible by 16")
-                
-                # ToTensorV2の後、imgとmaskはすでにPyTorchテンソル
-                # テンソルの型変換にはto()メソッドを使用
+                # Ensure mask is uint8 tensor
                 if isinstance(mask, torch.Tensor):
-                    # マスクの形状を確認し、必要に応じてCHW形式に変換
-                    # print(f"Before conversion - mask shape: {mask.shape}, type: {mask.dtype}")
-                    if mask.ndim == 3 and mask.shape[0] != 3 and mask.shape[2] == 3:  # HWC形式の場合
-                        # print(f"Converting mask from HWC to CHW format: {mask.shape}")
-                        mask = mask.permute(2, 0, 1)  # HWC -> CHW
-                        # print(f"After permute - mask shape: {mask.shape}")
-                    mask = mask.to(torch.uint8)  # テンソルの場合はto()を使用
-                    # print(f"Final mask shape: {mask.shape}, type: {mask.dtype}")
-                else:
-                    # print(f"Mask is NumPy array with shape: {mask.shape}, type: {mask.dtype}")
-                    mask = mask.astype(np.uint8)  # NumPy配列の場合はastype()を使用
-                
+                     # If mask came back as HWC tensor from transform (less common but possible)
+                     if mask.ndim == 3 and mask.shape[0] != 3 and mask.shape[2] == 3:
+                         mask = mask.permute(2, 0, 1) # HWC -> CHW
+                     mask = mask.to(torch.uint8)
+                else: # If transform didn't return tensor (e.g., no ToTensorV2)
+                     mask = mask.astype(np.uint8) # Ensure correct type before tensor conversion later
+
+                # Ensure image is float tensor
                 if isinstance(img, torch.Tensor):
-                    # 画像の形状を確認し、必要に応じてCHW形式に変換
-                    # print(f"Before conversion - image shape: {img.shape}, type: {img.dtype}")
-                    if img.ndim == 3 and img.shape[0] != 12 and img.shape[2] == 12:  # HWC形式の場合
-                        # print(f"Converting image from HWC to CHW format: {img.shape}")
-                        img = img.permute(2, 0, 1)  # HWC -> CHW
-                        # print(f"After permute - image shape: {img.shape}")
-                    img = img.to(torch.float32)  # テンソルの場合はto()を使用
-                    # print(f"Final image shape: {img.shape}, type: {img.dtype}")
+                    # If image came back as HWC tensor
+                    if img.ndim == 3 and img.shape[0] != num_channels and img.shape[2] == num_channels:
+                         img = img.permute(2, 0, 1) # HWC -> CHW
+                    img = img.to(torch.float32)
                 else:
-                    # print(f"Image is NumPy array with shape: {img.shape}, type: {img.dtype}")
-                    img = img.astype(np.float32)  # NumPy配列の場合はastype()を使用
+                     img = img.astype(np.float32) # Ensure correct type before tensor conversion later
 
             except Exception as e:
-                print(f"Error during transform application for {img_filename}: {e}")
-                # Decide how to handle transform errors: skip transform, raise error?
-                # For now, let's proceed with untransformed data if transform fails, but log warning.
-                print(f"Warning: Proceeding with untransformed data for {img_filename} due to transform error.")
-                # Ensure original mask is used if transform failed mid-way
-                mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8)
-                # img is already normalized before transform attempt
+                print(f"Error during transform for {img_filename}: {e}. Using untransformed data.")
+                # Re-stack original masks if transform failed midway and modified 'mask' var
+                mask = np.stack([field_mask, edge_mask, contact_mask], axis=0)
+                if self.scale_factor != 1.0: # Re-apply resize if necessary
+                    target_h, target_w = img_shape
+                    resized_mask_channels = [cv2.resize(mask[i], (target_w, target_h), interpolation=cv2.INTER_NEAREST) for i in range(3)]
+                    mask = np.stack(resized_mask_channels, axis=0)
+                mask = mask * 255
+                mask = mask.astype(np.uint8) # Ensure type
+                # img is already normalized np array here
 
-        # Convert to tensors if they aren't already
+        # --- Convert to Tensors ---
         try:
             if isinstance(img, np.ndarray):
-                img_tensor = torch.from_numpy(img.copy()).float()
-            else:
-                img_tensor = img.clone()  # すでにテンソルの場合はclone()を使用
-                
+                img_tensor = torch.from_numpy(img.copy()).float() # Ensure CHW if numpy
+            else: # Already a tensor from transform
+                img_tensor = img.float() # Ensure type
+
             if isinstance(mask, np.ndarray):
-                mask_tensor = torch.from_numpy(mask.copy()).to(torch.uint8)
-            else:
-                mask_tensor = mask.clone()  # すでにテンソルの場合はclone()を使用
+                mask_tensor = torch.from_numpy(mask.copy()).to(torch.uint8) # Ensure CHW if numpy
+            else: # Already a tensor from transform
+                mask_tensor = mask.to(torch.uint8) # Ensure type
+
         except Exception as e:
-            print(f"Error converting numpy arrays to tensors for {img_filename}: {e}")
+            print(f"Error converting data to tensors for {img_filename}: {e}")
             raise TypeError(f"Could not convert data to tensors for {img_filename}") from e
 
-        # Final check for tensor shapes
+        # --- Final shape check ---
         if img_tensor.shape[1:] != mask_tensor.shape[1:]:
-             raise ValueError(f"Final tensor shape mismatch for {img_filename}: "
-                              f"Image shape {img_tensor.shape}, Mask shape {mask_tensor.shape}")
-
-        # # 最終的なテンソルの形状をログに出力
-        # print(f"Final tensors for {img_filename}:")
-        # print(f"  Image tensor: shape={img_tensor.shape}, type={img_tensor.dtype}")
-        # print(f"  Mask tensor: shape={mask_tensor.shape}, type={mask_tensor.dtype}")
+             # Add more detail to the error message
+             raise ValueError(
+                 f"Final tensor shape mismatch for {img_filename}: "
+                 f"Image shape {img_tensor.shape}, Mask shape {mask_tensor.shape}. "
+                 f"This likely happened after transformations or resizing. "
+                 f"Check transform pipeline and interpolation methods."
+             )
 
         return img_tensor, mask_tensor

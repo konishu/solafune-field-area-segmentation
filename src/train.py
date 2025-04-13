@@ -125,19 +125,21 @@ if __name__ == "__main__":
     ROOT_DIR = '/workspace/projects/solafune-field-area-segmentation'
     IMAGE_DIR = os.path.join(ROOT_DIR, 'data/train_images_mini') # Path to training images (adjust if needed)
     ANNOTATION_FILE = os.path.join(ROOT_DIR, 'data/train_annotation.json') # Path to training annotations (adjust if needed)
-    OUTPUT_DIR = os.path.join(ROOT_DIR, 'outputs','ex0') # Path to save model outputs
+    OUTPUT_DIR = os.path.join(ROOT_DIR, 'outputs','ex0','check') # Path to save model outputs
     BACKBONE = 'maxvit_small_tf_512.in1k' # Example backbone
     NUM_OUTPUT_CHANNELS = 3 # Number of output channels (field, edge, contact)
     PRETRAINED = True
     BATCH_SIZE = 1 # Adjust based on GPU memory
     NUM_WORKERS = 4 # Adjust based on CPU cores
-    NUM_EPOCHS = 100 # Number of training epochs
+    NUM_EPOCHS = 50 # Number of training epochs
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    INPUT_H = 512 # Original image height (example)
-    INPUT_W = 512 # Original image width (example)
-    SCALE_FACTOR = 1 # Resize scale factor from requirements
-    RESIZE_H = 1024
-    RESIZE_W = 1024
+    INPUT_H = 512 # Example, not directly used if RandomCrop is applied
+    INPUT_W = 512 # Example, not directly used if RandomCrop is applied
+    SCALE_FACTOR = 3 # Resize scale factor for initial loading in dataset
+    CROP_H = 512 # Height after RandomCrop
+    CROP_W = 512 # Width after RandomCrop
+    RESIZE_H = 1024 # Height after Resize transform (model input)
+    RESIZE_W = 1024 # Width after Resize transform (model input)
     # Pre-calculated mean/std (Example values - REPLACE WITH YOUR ACTUAL VALUES)
     # These should be calculated across your entire training dataset for all 12 channels
     # Example: DATASET_MEAN = [0.1, 0.1, ..., 0.1] # List of 12 means
@@ -153,6 +155,9 @@ if __name__ == "__main__":
     # MaxViTモデルは入力サイズが16の倍数である必要があるため、それに合わせて調整
     # 各画像のサイズは異なるため、PadIfNeededを使用して16の倍数にパディング
     transform = A.Compose([
+        # 512x512の領域をrandom_crop
+        A.RandomCrop(height=CROP_H, width=CROP_W, p=1.0),
+        # Resize to 1024x1024
         A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST),
         # 16の倍数になるようにパディング（min_heightとmin_widthは16の倍数に切り上げ）
         # A.PadIfNeeded(
@@ -161,8 +166,8 @@ if __name__ == "__main__":
         #     border_mode=cv2.BORDER_CONSTANT
         # ),
         # Add other augmentations here if needed (e.g., Flip, Rotate)
-        # A.HorizontalFlip(p=0.5),
-        # A.VerticalFlip(p=0.5),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
         ToTensorV2(), # Converts image HWC->CHW, mask HWC->CHW, scales image 0-255 -> 0-1 (mask remains 0 or 255 uint8)
     ])
     
@@ -176,9 +181,11 @@ if __name__ == "__main__":
             ann_json_path=ANNOTATION_FILE, # Corrected parameter name
             scale_factor=SCALE_FACTOR,     # Pass scale_factor
             transform=transform,
+            # edge_width and contact_width use defaults if not specified
+            contact_width=100,
+            edge_width=5,
             mean=DATASET_MEAN, # Pass pre-calculated mean
             std=DATASET_STD   # Pass pre-calculated std
-            # edge_width and contact_width use defaults if not specified
         )
 
         if len(dataset) == 0:
@@ -237,13 +244,10 @@ if __name__ == "__main__":
                     output_filename_base = os.path.splitext(original_img_filename)[0] + "_pred.png"
                     output_path = os.path.join(PREDICTION_DIR, output_filename_base)
 
-                    # Get original size using rasterio again (safer than relying on dataset internal state)
-                    try:
-                        with rasterio.open(original_img_path) as src:
-                            original_shape = (src.height, src.width)
-                    except Exception as e:
-                        print(f"Warning: Could not read original image {original_img_path} to get size. Skipping resize for this image. Error: {e}")
-                        original_shape = None
+                    # We don't need the original shape for this visualization.
+                    # We want to see the prediction corresponding to the 512x512 crop.
+                    # The model output corresponds to the 1024x1024 input size.
+                    # We will resize the output back to the CROP size (512x512).
 
                     # Perform inference
                     outputs = model(imgs)
@@ -254,14 +258,14 @@ if __name__ == "__main__":
                     pred_mask_np = pred_masks.squeeze(0).cpu().numpy() # (C, H, W) - Size after transform
                     pred_mask_np = pred_mask_np.transpose((1, 2, 0)) # (H, W, C)
 
-                    # Resize mask to original image size if original_shape is available
-                    if original_shape:
-                        pred_mask_np = cv2.resize(pred_mask_np, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_NEAREST)
-                        # Ensure 3 channels after resize
-                        if pred_mask_np.ndim == 2:
-                             pred_mask_np = np.stack([pred_mask_np]*3, axis=-1)
-                        elif pred_mask_np.ndim == 3 and pred_mask_np.shape[2] == 1:
-                             pred_mask_np = np.concatenate([pred_mask_np]*3, axis=-1)
+                    # Resize mask from model output size (RESIZE_H, RESIZE_W) back to CROP size
+                    pred_mask_np = cv2.resize(pred_mask_np, (CROP_W, CROP_H), interpolation=cv2.INTER_NEAREST)
+                    # Ensure 3 channels after resize (important if resize outputs 2D)
+                    if pred_mask_np.ndim == 2:
+                         pred_mask_np = np.stack([pred_mask_np]*3, axis=-1)
+                    elif pred_mask_np.ndim == 3 and pred_mask_np.shape[2] == 1:
+                         # If resize somehow kept 3 dims but only 1 channel
+                         pred_mask_np = np.concatenate([pred_mask_np]*3, axis=-1)
 
                     # Save the combined mask and per-class masks
                     try:
@@ -270,8 +274,8 @@ if __name__ == "__main__":
 
                         # Save each class mask separately
                         for class_idx in range(pred_mask_np.shape[2]):
-                             class_output_path = os.path.join(PREDICTION_DIR, f"{os.path.splitext(output_filename_base)[0]}_class_{class_idx}.png")
-                             cv2.imwrite(class_output_path, (pred_mask_np[:, :, class_idx] * 255).astype(np.uint8))
+                            class_output_path = os.path.join(PREDICTION_DIR, f"{os.path.splitext(output_filename_base)[0]}_class_{class_idx}.png")
+                            cv2.imwrite(class_output_path, (pred_mask_np[:, :, class_idx] * 255).astype(np.uint8))
                         progress_bar_infer.set_postfix(saved=output_filename_base)
                     except Exception as e:
                         print(f"Error saving prediction for {original_img_filename}: {e}")

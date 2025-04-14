@@ -6,7 +6,7 @@ from torch.utils.data import Dataset
 import rasterio
 import cv2
 from shapely.wkt import loads as wkt_loads
-from shapely.geometry import mapping # To convert polygon to coordinates
+from shapely.geometry import mapping, Polygon, MultiPolygon # To convert polygon to coordinates
 from skimage.morphology import erosion, dilation, footprint_rectangle # Using footprint_rectangle instead of deprecated square
 # footprint_rectangle is also fine, choose one consistently
 # from skimage.morphology import footprint_rectangle
@@ -114,6 +114,7 @@ class FieldSegmentationDataset(Dataset):
 
         img_filename = self.img_filenames[idx]
         img_path = os.path.join(self.img_dir, img_filename)
+        print(f'Loading image {img_path}...')
 
         # Load 12-band image
         try:
@@ -139,6 +140,11 @@ class FieldSegmentationDataset(Dataset):
             if img_resized_hwc.ndim == 2: img_resized_hwc = np.expand_dims(img_resized_hwc, axis=-1)
             img = img_resized_hwc.transpose((2, 0, 1))
             img_shape = (target_h, target_w) # Update shape for masks
+        
+        # target_h = int(original_height * self.scale_factor)
+        # target_w = int(original_width * self.scale_factor)
+        # img_shape = (target_h, target_w)
+        # print(f"Using original image shape: C={img.shape[0]}, H={img_shape[0]}, W={img_shape[1]}")
 
         # --- Normalize image ---
         if self.mean is not None and self.std is not None:
@@ -173,9 +179,28 @@ class FieldSegmentationDataset(Dataset):
                              if coords.shape[0] >= 3: coords_list.append(coords)
                         if coords_list: cv2.fillPoly(poly_mask, coords_list, 1)
                     elif isinstance(ann['segmentation'], (list, tuple)): # COCO list
-                         # Pass the scale_factor from the dataset instance
-                         temp_mask = segmentation_to_mask(ann['segmentation'], img_shape, self.scale_factor)
-                         poly_mask[temp_mask > 0] = 1
+                        # check if segmentation is suit as Polygon
+                        try:
+                            # フラットリストを (x, y) のペアに変換
+                            seg = ann['segmentation']
+                            if all(isinstance(x, (int, float)) for x in seg):
+                                if len(seg) % 2 != 0:
+                                    raise ValueError("Segmentation list must contain even number of coordinates.")
+                                coords = list(zip(seg[0::2], seg[1::2]))  # [(x1, y1), (x2, y2), ...]
+                                polygon = Polygon(coords)
+                            else:
+                                # すでに [[x1, y1, x2, y2, ...]] 形式の場合（複数ポリゴン）
+                                polygon = MultiPolygon([
+                                    Polygon(list(zip(poly[0::2], poly[1::2]))) for poly in seg
+                                ])
+                        except Exception as e:
+                            print(f"Warning: Invalid segmentation data for {img_filename}: {e}")
+                            print(ann['segmentation'])
+                            continue
+                        # exit()
+                        # Pass the scale_factor from the dataset instance
+                        temp_mask = segmentation_to_mask(ann['segmentation'], img_shape, self.scale_factor)
+                        poly_mask[temp_mask > 0] = 1
                     # --- End WKT/COCO ---
                     if np.any(poly_mask):
                         instance_id += 1
@@ -186,7 +211,6 @@ class FieldSegmentationDataset(Dataset):
 
         # 1. Field mask (footprint)
         field_mask = (labels > 0).astype(np.uint8)
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/field_{img_path.split("/")[-1].replace(".tif","")}.png', field_mask * 255)  # Save field mask as PNG (0-255)
 
         # 2. Edge mask
         edge_mask = np.zeros(img_shape, dtype=np.uint8)
@@ -205,7 +229,6 @@ class FieldSegmentationDataset(Dataset):
                         edge_mask[edge] = 1 # Accumulate edges
                     except Exception as e:
                         print(f"Warning: Error during edge erosion for instance {i} in {img_filename}: {e}")
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/edge_{img_path.split('/')[-1].replace(".tif","")}.png', edge_mask * 255)  # Save edge mask as PNG (0-255)
 
         # 3. Contact mask (Modified Logic)
         contact_mask = np.zeros(img_shape, dtype=np.uint8)
@@ -256,18 +279,23 @@ class FieldSegmentationDataset(Dataset):
             except Exception as e:
                 print(f"Warning: Error during contact mask generation for {img_filename}: {e}")
                 # contact_mask remains zeros if an error occurs
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/contact_{img_path.split("/")[-1].replace(".tif","")}.png', contact_mask * 255)  # Save contact mask as PNG (0-255)
+
+    
 
         # --- Stack and finalize masks ---
         if not (field_mask.shape == edge_mask.shape == contact_mask.shape == img_shape):
             raise ValueError(f"Mask shape mismatch for {img_filename}")
-
+        
+        # Save masks for debugging
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/field_{img_path.split("/")[-1].replace(".tif","")}.png', field_mask * 255)  # Save field mask as PNG (0-255)
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/edge_{img_path.split('/')[-1].replace(".tif","")}.png', edge_mask * 255)  # Save edge mask as PNG (0-255)
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/contact_{img_path.split("/")[-1].replace(".tif","")}.png', contact_mask * 255)  # Save contact mask as PNG (0-255)
         # Stack masks: (3, H, W)
         mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8)
         # 3クラスのマスクを作成 (0: 背景, 1: field, 2: contact, 3: edge)し、red, blue, greenにして保存
         mask_ = np.stack([field_mask, contact_mask, edge_mask], axis=0).astype(np.uint8) # (3, H, W)
         # Save the combined mask as PNG (0-255)
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/train_{img_path.split("/")[-1].replace(".tif","")}.png', mask_.transpose((1, 2, 0)) * 255)  # Save combined mask as PNG (0-255)
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/combined_{img_path.split("/")[-1].replace(".tif","")}.png', mask_.transpose((1, 2, 0)) * 255)  # Save combined mask as PNG (0-255)
 
         # --- Resize masks if image was resized (using updated img_shape) ---
         if self.scale_factor != 1.0:
@@ -278,9 +306,11 @@ class FieldSegmentationDataset(Dataset):
                  resized_ch = cv2.resize(mask[i], (target_w, target_h), interpolation=cv2.INTER_NEAREST)
                  resized_mask_channels.append(resized_ch)
             mask = np.stack(resized_mask_channels, axis=0)
+        print("Final mask shape:", mask.shape,f"{ img_shape= }")
 
         # Scale mask values to 0-255 AFTER potential resizing
         mask = mask * 255
+        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/train_{img_path.split("/")[-1].replace(".tif","")}.png', mask.transpose((1, 2, 0)) )  # Save combined mask as PNG (0-255)
 
         # --- Apply transformations ---
         if self.transform:

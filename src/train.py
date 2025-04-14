@@ -8,6 +8,7 @@ from tqdm import tqdm
 import numpy as np
 import cv2 # Import OpenCV
 import os
+import shutil
 import rasterio
 from torchsummary import summary
 
@@ -123,15 +124,16 @@ def train_model(model, dataloader, num_epochs=10, device='cuda'):
 if __name__ == "__main__":
     # --- Configuration ---
     ROOT_DIR = '/workspace/projects/solafune-field-area-segmentation'
-    IMAGE_DIR = os.path.join(ROOT_DIR, 'data/train_images_mini') # Path to training images (adjust if needed)
+    EX_NUM = 'ex0' # Example experiment number
+    IMAGE_DIR = os.path.join(ROOT_DIR, 'data/train_images') # Path to training images (adjust if needed)
     ANNOTATION_FILE = os.path.join(ROOT_DIR, 'data/train_annotation.json') # Path to training annotations (adjust if needed)
-    OUTPUT_DIR = os.path.join(ROOT_DIR, 'outputs','ex0','check') # Path to save model outputs
+    OUTPUT_DIR = os.path.join(ROOT_DIR, 'outputs',EX_NUM,'check') # Path to save model outputs
     BACKBONE = 'maxvit_small_tf_512.in1k' # Example backbone
     NUM_OUTPUT_CHANNELS = 3 # Number of output channels (field, edge, contact)
     PRETRAINED = True
     BATCH_SIZE = 1 # Adjust based on GPU memory
     NUM_WORKERS = 4 # Adjust based on CPU cores
-    NUM_EPOCHS = 50 # Number of training epochs
+    NUM_EPOCHS = 1 # Number of training epochs
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     INPUT_H = 512 # Example, not directly used if RandomCrop is applied
     INPUT_W = 512 # Example, not directly used if RandomCrop is applied
@@ -172,6 +174,17 @@ if __name__ == "__main__":
     ])
     
     print(f"Images will be resized to {RESIZE_H}x{RESIZE_W} and padded to ensure dimensions are divisible by 16")
+    
+       
+    # Save masks for debugging
+    if os.path.exists(f'/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check'):
+        try:
+            # Remove existing check directory if it exists
+            # 1. Remove existing directory
+            shutil.rmtree(f'/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check', ignore_errors=True)
+            os.makedirs(f'/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check', exist_ok=True) 
+        except Exception as e:
+            print(f"Error removing existing check directory: {e}")
 
     # Ensure FieldSegmentationDataset is correctly implemented and paths/file are valid
     try:
@@ -182,8 +195,8 @@ if __name__ == "__main__":
             scale_factor=SCALE_FACTOR,     # Pass scale_factor
             transform=transform,
             # edge_width and contact_width use defaults if not specified
-            contact_width=100,
-            edge_width=5,
+            contact_width=5,
+            edge_width=3,
             mean=DATASET_MEAN, # Pass pre-calculated mean
             std=DATASET_STD   # Pass pre-calculated std
         )

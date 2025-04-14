@@ -99,7 +99,8 @@ def inference(model_path, image_path, output_path, device='cuda'):
         #     border_mode=cv2.BORDER_CONSTANT
         # ),
         # Add other augmentations here if needed (e.g., Flip, Rotate)
-        # A.HorizontalFlip(p=0.5),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
         ToTensorV2(), # Converts image HWC->CHW, mask HWC->CHW, scales image 0-255 -> 0-1 (mask remains 0 or 255 uint8)
     ])
 

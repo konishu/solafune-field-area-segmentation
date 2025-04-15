@@ -29,94 +29,112 @@ except ImportError:
         def __init__(self, *args, **kwargs): super().__init__(); self.dummy = nn.Linear(1,1)
         def forward(self, x): return self.dummy(torch.zeros(x.shape[0], 1))
 
+# --- Dice Loss 実装 ---
+def dice_coeff(pred, target, smooth=1.0, epsilon=1e-6):
+    """Calculates Dice Coefficient per class."""
+    # pred: (N, C, H, W), target: (N, C, H, W)
+    # Apply sigmoid to predictions
+    pred = torch.sigmoid(pred)
 
-def train_model(model, dataloader, num_epochs=10, device='cuda'):
+    # Flatten spatial dimensions
+    pred_flat = pred.view(pred.shape[0], pred.shape[1], -1) # (N, C, H*W)
+    target_flat = target.view(target.shape[0], target.shape[1], -1) # (N, C, H*W)
+
+    intersection = (pred_flat * target_flat).sum(2) # (N, C)
+    pred_sum = pred_flat.sum(2) # (N, C)
+    target_sum = target_flat.sum(2) # (N, C)
+
+    dice = (2. * intersection + smooth) / (pred_sum + target_sum + smooth + epsilon) # (N, C)
+
+    return dice # Return per-class dice score for the batch
+
+def dice_loss(pred, target, smooth=1.0, epsilon=1e-6):
+    """Calculates Dice Loss (average over classes)."""
+    dice_coeffs = dice_coeff(pred, target, smooth, epsilon) # (N, C)
+    # Average dice score across classes, then subtract from 1
+    return 1.0 - dice_coeffs.mean()
+
+
+def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5, dice_weight=0.5):
     """
-    Trains the U-Net model.
+    Trains the U-Net model using BCE + Dice loss.
 
     Args:
         model (nn.Module): The U-Net model to train.
         dataloader (DataLoader): DataLoader providing training images and masks.
         num_epochs (int): Number of training epochs.
         device (str): Device to train on ('cuda' or 'cpu').
+        bce_weight (float): Weight for BCE loss.
+        dice_weight (float): Weight for Dice loss.
     """
     if not torch.cuda.is_available() and device == 'cuda':
         print("CUDA not available, switching to CPU.")
         device = 'cpu'
     model.to(device)
-    # Use BCEWithLogitsLoss with reduction='none' to calculate per-element loss
-    criterion = nn.BCEWithLogitsLoss(reduction='none')
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-    print(f"Starting training on {device} for {num_epochs} epochs...")
+    # Use BCEWithLogitsLoss (reduction='mean' is simpler here)
+    criterion_bce = nn.BCEWithLogitsLoss() # Default reduction='mean'
+    # No need for separate Dice criterion instance if using the function directly
+
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4,weight_decay=1e-2)
+
+    print(f"Starting training on {device} for {num_epochs} epochs (BCE weight: {bce_weight}, Dice weight: {dice_weight})...")
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
+        running_bce_loss = 0.0
+        running_dice_loss = 0.0
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False)
+
         for batch in progress_bar:
-            # Handle potential errors if dataset returns None (e.g., dummy data case)
             if batch is None:
                 print("Warning: Skipping empty batch.")
                 continue
-            imgs, masks = batch
 
-            # # バッチの形状をログに出力
-            # print(f"Batch shapes - imgs: {imgs.shape}, masks: {masks.shape}")
+            # Modify dataset __getitem__ to return filename if needed for safer inference later
+            # Assuming batch now contains: imgs, masks (and potentially filename)
+            # Example: imgs, masks, _ = batch # If filename is returned
+            imgs, masks = batch # Assuming original return format for now
 
-            # Ensure masks are FloatTensor for BCEWithLogitsLoss and scale to 0.0-1.0
-            # Dataset now returns uint8 [0, 255], convert to float [0.0, 1.0]
             imgs = imgs.to(device)
+            # Ensure masks are FloatTensor for loss functions and scale to 0.0-1.0
             masks = masks.to(device, dtype=torch.float) / 255.0
-            
 
-            # Zero the parameter gradients
             optimizer.zero_grad()
-            print("====================================")
 
             # Forward pass
             outputs = model(imgs)
-            print("-----------------")
-            
-            # # モデルの出力形状とマスクの形状を損失計算直前に再度確認
-            # print(f"[Before Loss] Model output shape: {outputs.shape}, dtype: {outputs.dtype}")
-            # print(f"[Before Loss] Masks shape: {masks.shape}, dtype: {masks.dtype}")
 
-            # Ensure output and target shapes match for BCEWithLogitsLoss: (N, C, H, W)
-            # Check spatial dimensions explicitly
+            # --- Shape Checks (Unchanged, still good practice) ---
             if outputs.shape[2:] != masks.shape[2:]:
-                 print(f"Error: Spatial dimensions mismatch! Output: {outputs.shape[2:]}, Mask: {masks.shape[2:]}")
-                 # Optionally raise an error or handle it
-                 raise ValueError(f"Spatial dimension mismatch between model output {outputs.shape} and mask {masks.shape}")
-            # Check channel dimension (should be handled by the error message, but good to be explicit)
+                 raise ValueError(f"Spatial dimension mismatch! Output: {outputs.shape}, Mask: {masks.shape}")
             if outputs.shape[1] != masks.shape[1]:
-                 print(f"Error: Channel dimensions mismatch! Output: {outputs.shape[1]}, Mask: {masks.shape[1]}")
-                 raise ValueError(f"Channel dimension mismatch between model output {outputs.shape} and mask {masks.shape}")
+                 raise ValueError(f"Channel dimension mismatch! Output: {outputs.shape}, Mask: {masks.shape}")
+            # --- End Shape Checks ---
 
-            # Calculate per-element loss
-            pixel_losses = criterion(outputs, masks) # Shape: (N, C, H, W)
+            # --- Loss Calculation ---
+            # Calculate BCE loss (averaged over batch and pixels)
+            loss_bce = criterion_bce(outputs, masks)
 
-            # Calculate mean loss per channel (class)
-            loss_field = pixel_losses[:, 0, :, :].mean()
-            loss_edge = pixel_losses[:, 1, :, :].mean()
-            loss_contact = pixel_losses[:, 2, :, :].mean()
+            # Calculate Dice loss (averaged over classes)
+            loss_dice = dice_loss(outputs, masks) # Pass raw logits to dice_loss
 
-            # Calculate the overall mean loss for backpropagation
-            total_loss = pixel_losses.mean()
+            # Combine losses
+            total_loss = bce_weight * loss_bce + dice_weight * loss_dice
+            # --- End Loss Calculation ---
 
-            # Backward pass and optimize using the total loss
             total_loss.backward()
             optimizer.step()
 
             running_loss += total_loss.item()
-            progress_bar.set_postfix(loss=total_loss.item(), field=loss_field.item(), edge=loss_edge.item(), contact=loss_contact.item())
+            running_bce_loss += loss_bce.item()
+            running_dice_loss += loss_dice.item()
+            progress_bar.set_postfix(loss=total_loss.item(), bce=loss_bce.item(), dice=loss_dice.item())
 
         avg_loss = running_loss / len(dataloader)
-        # Calculate average losses for the epoch (optional, for cleaner logging)
-        # Note: This requires storing per-class losses per batch and averaging at the end
-        # For simplicity, the progress bar already shows the last batch's per-class loss.
-        # We print the average total loss here.
-        print(f"Epoch {epoch+1} Average Total Loss: {avg_loss:.4f}")
-        # You could add more detailed logging here if needed, e.g., average per-class loss for the epoch
+        avg_bce_loss = running_bce_loss / len(dataloader)
+        avg_dice_loss = running_dice_loss / len(dataloader)
+        print(f"Epoch {epoch+1} Avg Loss: {avg_loss:.4f} (BCE: {avg_bce_loss:.4f}, Dice: {avg_dice_loss:.4f})")
 
     print("Training finished.")
 
@@ -125,7 +143,7 @@ if __name__ == "__main__":
     # --- Configuration ---
     ROOT_DIR = '/workspace/projects/solafune-field-area-segmentation'
     EX_NUM = 'ex0' # Example experiment number
-    IMAGE_DIR = os.path.join(ROOT_DIR, 'data/train_images') # Path to training images (adjust if needed)
+    IMAGE_DIR = os.path.join(ROOT_DIR, 'data/train_images_mini') # Path to training images (adjust if needed)
     ANNOTATION_FILE = os.path.join(ROOT_DIR, 'data/train_annotation.json') # Path to training annotations (adjust if needed)
     OUTPUT_DIR = os.path.join(ROOT_DIR, 'outputs',EX_NUM,'check') # Path to save model outputs
     BACKBONE = 'maxvit_small_tf_512.in1k' # Example backbone
@@ -133,7 +151,7 @@ if __name__ == "__main__":
     PRETRAINED = True
     BATCH_SIZE = 1 # Adjust based on GPU memory
     NUM_WORKERS = 4 # Adjust based on CPU cores
-    NUM_EPOCHS = 1 # Number of training epochs
+    NUM_EPOCHS = 100 # Number of training epochs
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     INPUT_H = 512 # Example, not directly used if RandomCrop is applied
     INPUT_W = 512 # Example, not directly used if RandomCrop is applied
@@ -148,6 +166,9 @@ if __name__ == "__main__":
     # Example: DATASET_STD = [0.05, 0.05, ..., 0.05] # List of 12 stds
     DATASET_MEAN = None # Set to None to use per-image normalization if not pre-calculated
     DATASET_STD = None  # Set to None to use per-image normalization if not pre-calculated
+    # Loss weights
+    BCE_WEIGHT = 0.5
+    DICE_WEIGHT = 0.5
     # ---------------------
 
     print("Setting up dataset and dataloader...")
@@ -217,7 +238,7 @@ if __name__ == "__main__":
         print(f"Model: UNet with {BACKBONE} backbone, {NUM_OUTPUT_CHANNELS} output channels.")
 
         # Start training
-        train_model(model, dataloader, num_epochs=NUM_EPOCHS, device=DEVICE)
+        train_model(model, dataloader, num_epochs=NUM_EPOCHS, device=DEVICE, bce_weight=BCE_WEIGHT, dice_weight=DICE_WEIGHT)
         
         # Save the model after training
         if not os.path.exists(OUTPUT_DIR):
@@ -228,76 +249,7 @@ if __name__ == "__main__":
         torch.save(model.state_dict(), os.path.join(OUTPUT_DIR,'model.path'))
         print(f"Model saved to {OUTPUT_DIR}")
 
-        # --- Inference on Training Data ---
-        print("\nStarting inference on training data...")
-        PREDICTION_DIR = os.path.join(OUTPUT_DIR, 'train_predictions')
-        if not os.path.exists(PREDICTION_DIR):
-            os.makedirs(PREDICTION_DIR)
-            print(f"Prediction directory created: {PREDICTION_DIR}")
-
-        # Use the same dataset but with batch_size=1 and shuffle=False for inference
-        # Re-create transform without random augmentations if needed, but using the same for simplicity here
-        inference_dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=NUM_WORKERS)
-
-        model.eval()  # Set model to evaluation mode
-        with torch.no_grad():
-            progress_bar_infer = tqdm(inference_dataloader, desc="Inferring on train set")
-            for i, batch in enumerate(progress_bar_infer):
-                if batch is None: continue
-                imgs, _ = batch # We don't need masks for inference
-                imgs = imgs.to(DEVICE)
-
-                # Get original image path to derive output filename and original size
-                # This assumes dataset.__getitem__ returns data in the same order as self.img_filenames
-                # It's safer to modify the dataset to return the filename or index
-                # For simplicity, we reconstruct the path based on index (less robust)
-                if i < len(dataset.img_filenames):
-                    original_img_filename = dataset.img_filenames[i]
-                    original_img_path = os.path.join(IMAGE_DIR, original_img_filename)
-                    output_filename_base = os.path.splitext(original_img_filename)[0] + "_pred.png"
-                    output_path = os.path.join(PREDICTION_DIR, output_filename_base)
-
-                    # We don't need the original shape for this visualization.
-                    # We want to see the prediction corresponding to the 512x512 crop.
-                    # The model output corresponds to the 1024x1024 input size.
-                    # We will resize the output back to the CROP size (512x512).
-
-                    # Perform inference
-                    outputs = model(imgs)
-                    outputs = torch.sigmoid(outputs)
-                    pred_masks = (outputs > 0.5).float() # Thresholding
-
-                    # Process and save mask
-                    pred_mask_np = pred_masks.squeeze(0).cpu().numpy() # (C, H, W) - Size after transform
-                    pred_mask_np = pred_mask_np.transpose((1, 2, 0)) # (H, W, C)
-
-                    # Resize mask from model output size (RESIZE_H, RESIZE_W) back to CROP size
-                    pred_mask_np = cv2.resize(pred_mask_np, (CROP_W, CROP_H), interpolation=cv2.INTER_NEAREST)
-                    # Ensure 3 channels after resize (important if resize outputs 2D)
-                    if pred_mask_np.ndim == 2:
-                         pred_mask_np = np.stack([pred_mask_np]*3, axis=-1)
-                    elif pred_mask_np.ndim == 3 and pred_mask_np.shape[2] == 1:
-                         # If resize somehow kept 3 dims but only 1 channel
-                         pred_mask_np = np.concatenate([pred_mask_np]*3, axis=-1)
-
-                    # Save the combined mask and per-class masks
-                    try:
-                        # Save combined mask (optional, might be hard to visualize)
-                        # cv2.imwrite(output_path, (pred_mask_np * 255).astype(np.uint8))
-
-                        # Save each class mask separately
-                        for class_idx in range(pred_mask_np.shape[2]):
-                            class_output_path = os.path.join(PREDICTION_DIR, f"{os.path.splitext(output_filename_base)[0]}_class_{class_idx}.png")
-                            cv2.imwrite(class_output_path, (pred_mask_np[:, :, class_idx] * 255).astype(np.uint8))
-                        progress_bar_infer.set_postfix(saved=output_filename_base)
-                    except Exception as e:
-                        print(f"Error saving prediction for {original_img_filename}: {e}")
-                else:
-                    print(f"Warning: Index {i} out of bounds for dataset filenames.")
-
-        print(f"Training data predictions saved to {PREDICTION_DIR}")
-
-
+        # Inference part moved to train_inference.py
     except NameError:
          print("Error: FieldSegmentationDataset or UNet class not found. Ensure 'src' is in PYTHONPATH or run from the project root. Cannot run training.")
     except FileNotFoundError as e:

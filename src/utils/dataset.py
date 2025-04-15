@@ -286,10 +286,10 @@ class FieldSegmentationDataset(Dataset):
         if not (field_mask.shape == edge_mask.shape == contact_mask.shape == img_shape):
             raise ValueError(f"Mask shape mismatch for {img_filename}")
         
-        # Save masks for debugging
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/field_{img_path.split("/")[-1].replace(".tif","")}.png', field_mask * 255)  # Save field mask as PNG (0-255)
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/edge_{img_path.split('/')[-1].replace(".tif","")}.png', edge_mask * 255)  # Save edge mask as PNG (0-255)
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/contact_{img_path.split("/")[-1].replace(".tif","")}.png', contact_mask * 255)  # Save contact mask as PNG (0-255)
+        # # Save masks for debugging
+        # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/field_{img_path.split("/")[-1].replace(".tif","")}.png', field_mask * 255)  # Save field mask as PNG (0-255)
+        # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/edge_{img_path.split('/')[-1].replace(".tif","")}.png', edge_mask * 255)  # Save edge mask as PNG (0-255)
+        # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/contact_{img_path.split("/")[-1].replace(".tif","")}.png', contact_mask * 255)  # Save contact mask as PNG (0-255)
         # Stack masks: (3, H, W)
         mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8)
         # 3クラスのマスクを作成 (0: 背景, 1: field, 2: contact, 3: edge)し、red, blue, greenにして保存

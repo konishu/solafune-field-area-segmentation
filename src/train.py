@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast,GradScaler
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
@@ -77,6 +78,8 @@ def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5,
     # No need for separate Dice criterion instance if using the function directly
 
     optimizer = optim.AdamW(model.parameters(), lr=1e-4,weight_decay=1e-2)
+    scaler = torch.amp.GradScaler('cuda') 
+    
 
     print(f"Starting training on {device} for {num_epochs} epochs (BCE weight: {bce_weight}, Dice weight: {dice_weight})...")
     for epoch in range(num_epochs):
@@ -101,31 +104,40 @@ def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5,
             masks = masks.to(device, dtype=torch.float) / 255.0
 
             optimizer.zero_grad()
+            
+            with torch.amp.autocast():
+                # Forward pass
+                outputs = model(imgs)
 
-            # Forward pass
-            outputs = model(imgs)
+                # --- Shape Checks (Unchanged, still good practice) ---
+                if outputs.shape[2:] != masks.shape[2:]:
+                    raise ValueError(f"Spatial dimension mismatch! Output: {outputs.shape}, Mask: {masks.shape}")
+                if outputs.shape[1] != masks.shape[1]:
+                    raise ValueError(f"Channel dimension mismatch! Output: {outputs.shape}, Mask: {masks.shape}")
+                # --- End Shape Checks ---
 
-            # --- Shape Checks (Unchanged, still good practice) ---
-            if outputs.shape[2:] != masks.shape[2:]:
-                 raise ValueError(f"Spatial dimension mismatch! Output: {outputs.shape}, Mask: {masks.shape}")
-            if outputs.shape[1] != masks.shape[1]:
-                 raise ValueError(f"Channel dimension mismatch! Output: {outputs.shape}, Mask: {masks.shape}")
-            # --- End Shape Checks ---
+                # --- Loss Calculation ---
+                # Calculate BCE loss (averaged over batch and pixels)
+                loss_bce = criterion_bce(outputs, masks)
 
-            # --- Loss Calculation ---
-            # Calculate BCE loss (averaged over batch and pixels)
-            loss_bce = criterion_bce(outputs, masks)
+                # Calculate Dice loss (averaged over classes)
+                loss_dice = dice_loss(outputs, masks) # Pass raw logits to dice_loss
 
-            # Calculate Dice loss (averaged over classes)
-            loss_dice = dice_loss(outputs, masks) # Pass raw logits to dice_loss
+                # Combine losses
+                total_loss = bce_weight * loss_bce + dice_weight * loss_dice
+                # --- End Loss Calculation ---
 
-            # Combine losses
-            total_loss = bce_weight * loss_bce + dice_weight * loss_dice
-            # --- End Loss Calculation ---
-
-            total_loss.backward()
-            optimizer.step()
-
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
+            # total_loss,loss_bce,loss_dixeのうちnanが出た場合は,ファイル名を出力
+            if torch.isnan(total_loss) or torch.isnan(loss_bce) or torch.isnan(loss_dice):
+                print(f"NaN loss encountered in epoch {epoch+1}.")
+                # Assuming filename is part of the batch
+                # print(f"Filename: {batch[2]}") # Uncomment if filename is returned in batch
+                continue
+            
             running_loss += total_loss.item()
             running_bce_loss += loss_bce.item()
             running_dice_loss += loss_dice.item()
@@ -142,14 +154,14 @@ def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5,
 if __name__ == "__main__":
     # --- Configuration ---
     ROOT_DIR = '/workspace/projects/solafune-field-area-segmentation'
-    EX_NUM = 'ex0' # Example experiment number
+    EX_NUM = 'ex1' # Example experiment number
     IMAGE_DIR = os.path.join(ROOT_DIR, 'data/train_images_mini') # Path to training images (adjust if needed)
     ANNOTATION_FILE = os.path.join(ROOT_DIR, 'data/train_annotation.json') # Path to training annotations (adjust if needed)
     OUTPUT_DIR = os.path.join(ROOT_DIR, 'outputs',EX_NUM,'check') # Path to save model outputs
     BACKBONE = 'maxvit_small_tf_512.in1k' # Example backbone
     NUM_OUTPUT_CHANNELS = 3 # Number of output channels (field, edge, contact)
     PRETRAINED = True
-    BATCH_SIZE = 1 # Adjust based on GPU memory
+    BATCH_SIZE = 2 # Adjust based on GPU memory
     NUM_WORKERS = 4 # Adjust based on CPU cores
     NUM_EPOCHS = 100 # Number of training epochs
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -206,7 +218,10 @@ if __name__ == "__main__":
             os.makedirs(f'/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check', exist_ok=True) 
         except Exception as e:
             print(f"Error removing existing check directory: {e}")
-
+    else:
+        # 2. Create new directory
+        os.makedirs(f'/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check', exist_ok=True) 
+        print(f"Output directory created: {OUTPUT_DIR}")
     # Ensure FieldSegmentationDataset is correctly implemented and paths/file are valid
     try:
         # Initialize dataset with paths, mean/std, and transform

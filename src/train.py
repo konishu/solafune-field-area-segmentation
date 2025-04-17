@@ -16,19 +16,9 @@ from torchsummary import summary
 
 # Assuming FieldSegmentationDataset is defined in utils.dataset and UNet in models.unet_maxvit
 # Adjust imports based on your actual project structure if different
-try:
-    from utils.dataset import FieldSegmentationDataset # Corrected class name
-    from models.unet_maxvit import UNet
-except ImportError:
-    print("Warning: Could not import CustomDataset or UNet. Ensure they are defined in the correct paths (src/utils/dataset.py and src/models/unet_maxvit.py)")
-    # Define dummy classes if imports fail, to allow the script to load
-    class FieldSegmentationDataset: # Corrected dummy class name
-        def __init__(self, *args, **kwargs): pass
-        def __len__(self): return 0
-        def __getitem__(self, idx): return torch.zeros(3, 64, 64), torch.zeros(3, 64, 64) # Return dummy tensors
-    class UNet(nn.Module):
-        def __init__(self, *args, **kwargs): super().__init__(); self.dummy = nn.Linear(1,1)
-        def forward(self, x): return self.dummy(torch.zeros(x.shape[0], 1))
+from utils.dataset import FieldSegmentationDataset # Corrected class name
+from models.unet_maxvit import UNet
+
 
 # --- Dice Loss 実装 ---
 def dice_coeff(pred, target, smooth=1.0, epsilon=1e-6):
@@ -105,7 +95,7 @@ def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5,
 
             optimizer.zero_grad()
             
-            with torch.amp.autocast():
+            with torch.amp.autocast(device_type=device, dtype=torch.bfloat16):
                 # Forward pass
                 outputs = model(imgs)
 
@@ -163,7 +153,7 @@ if __name__ == "__main__":
     PRETRAINED = True
     BATCH_SIZE = 2 # Adjust based on GPU memory
     NUM_WORKERS = 4 # Adjust based on CPU cores
-    NUM_EPOCHS = 100 # Number of training epochs
+    NUM_EPOCHS = 500 # Number of training epochs
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     INPUT_H = 512 # Example, not directly used if RandomCrop is applied
     INPUT_W = 512 # Example, not directly used if RandomCrop is applied
@@ -249,7 +239,7 @@ if __name__ == "__main__":
         # Initialize model with the number of output channels (not classes for BCE loss)
         model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS)
         model.to(DEVICE)  # Move model to the specified device
-        print(summary(model, (12, 512, 512)))
+        # print(summary(model, (12, 512, 512)))
         print(f"Model: UNet with {BACKBONE} backbone, {NUM_OUTPUT_CHANNELS} output channels.")
 
         # Start training
@@ -264,7 +254,6 @@ if __name__ == "__main__":
         torch.save(model.state_dict(), os.path.join(OUTPUT_DIR,'model.path'))
         print(f"Model saved to {OUTPUT_DIR}")
 
-        # Inference part moved to train_inference.py
     except NameError:
          print("Error: FieldSegmentationDataset or UNet class not found. Ensure 'src' is in PYTHONPATH or run from the project root. Cannot run training.")
     except FileNotFoundError as e:

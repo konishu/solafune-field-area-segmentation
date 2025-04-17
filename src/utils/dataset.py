@@ -13,6 +13,10 @@ from skimage.morphology import erosion, dilation, footprint_rectangle # Using fo
 from skimage.segmentation import watershed
 # from skimage.measure import label as skimage_label # Not used in this implementation
 
+# キャッシュファイルのディレクトリ
+CACHE_DIR = "/workspace/projects/solafune-field-area-segmentation/data/cache"
+
+
 # Helper function to convert COCO segmentation format to mask
 def segmentation_to_mask(segmentation, shape, scale_factor=1.0):
     """Converts polygon segmentation [x1, y1, x2, y2,...] to a binary mask, applying scaling."""
@@ -114,204 +118,222 @@ class FieldSegmentationDataset(Dataset):
 
         img_filename = self.img_filenames[idx]
         img_path = os.path.join(self.img_dir, img_filename)
-        print(f'Loading image {img_path}...')
-
-        # Load 12-band image
+        cache_path = os.path.join(CACHE_DIR, img_filename.replace(".tif", ".npz"))
         try:
-            with rasterio.open(img_path) as src:
-                img = src.read().astype(np.float32) # (C, H, W)
-                img_shape = (src.height, src.width)
-        except Exception as e:
-            print(f"Error loading image {img_path}: {e}")
-            raise IOError(f"Could not read image file {img_path}") from e
-
-        if img.ndim != 3 or img.shape[1:] != img_shape:
-             raise ValueError(f"Image {img_path} has unexpected shape: {img.shape}, expected (C, {img_shape[0]}, {img_shape[1]})")
-
-        num_channels = img.shape[0]
-        original_height, original_width = img_shape
-
-        # --- Stage 1 Resize based on scale_factor ---
-        if self.scale_factor != 1.0:
-            target_h = int(original_height * self.scale_factor)
-            target_w = int(original_width * self.scale_factor)
-            img_hwc = img.transpose((1, 2, 0))
-            img_resized_hwc = cv2.resize(img_hwc, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-            if img_resized_hwc.ndim == 2: img_resized_hwc = np.expand_dims(img_resized_hwc, axis=-1)
-            img = img_resized_hwc.transpose((2, 0, 1))
-            img_shape = (target_h, target_w) # Update shape for masks
+            print(f'Loading from cache: {cache_path}')
+            loaded = np.load(cache_path)
+            img = loaded['img']
+            mask = loaded['mask']
+            num_channels = img.shape[0]
+            original_height, original_width = img.shape[1:]
+            img_shape = original_height, original_width
+            
+            field_mask = mask[0]
+            
         
-        # target_h = int(original_height * self.scale_factor)
-        # target_w = int(original_width * self.scale_factor)
-        # img_shape = (target_h, target_w)
-        # print(f"Using original image shape: C={img.shape[0]}, H={img_shape[0]}, W={img_shape[1]}")
+        except:
 
-        # --- Normalize image ---
-        if self.mean is not None and self.std is not None:
-            if self.mean.shape[0] != num_channels or self.std.shape[0] != num_channels:
-                 raise ValueError(f"Mean/std channel mismatch for {img_filename}")
-            img = (img - self.mean) / (self.std + 1e-6)
-        else:
-            img_mean = img.mean(axis=(1, 2), keepdims=True)
-            img_std = img.std(axis=(1, 2), keepdims=True)
-            img = (img - img_mean) / (img_std + 1e-6)
+            print(f'Loading image {img_path} (and creating cache)...')
 
-        # --- Mask Generation ---
-        img_annotations = self.annotations.get(img_filename, [])
-        labels = np.zeros(img_shape, dtype=np.uint16)
-        instance_id = 0
-        # --- (Instance Label Map Generation - same as before) ---
-        for ann in img_annotations:
-            if not isinstance(ann, dict) or 'class' not in ann or 'segmentation' not in ann: continue
-            if ann['class'] == 'field' and ann['segmentation']:
-                poly_mask = np.zeros(img_shape, dtype=np.uint8)
-                try:
-                    # --- WKT/COCO Polygon Processing (same as before) ---
-                    if isinstance(ann['segmentation'], str): # WKT
-                        polygon = wkt_loads(ann['segmentation'])
-                        coords_list = []
-                        if polygon.geom_type == 'MultiPolygon':
-                            for poly in polygon.geoms:
-                                coords = np.array(mapping(poly)['coordinates'][0]).round().astype(np.int32)
-                                if coords.shape[0] >= 3: coords_list.append(coords)
-                        elif polygon.geom_type == 'Polygon':
-                             coords = np.array(mapping(polygon)['coordinates'][0]).round().astype(np.int32)
-                             if coords.shape[0] >= 3: coords_list.append(coords)
-                        if coords_list: cv2.fillPoly(poly_mask, coords_list, 1)
-                    elif isinstance(ann['segmentation'], (list, tuple)): # COCO list
-                        # check if segmentation is suit as Polygon
-                        try:
-                            # フラットリストを (x, y) のペアに変換
-                            seg = ann['segmentation']
-                            if all(isinstance(x, (int, float)) for x in seg):
-                                if len(seg) % 2 != 0:
-                                    raise ValueError("Segmentation list must contain even number of coordinates.")
-                                coords = list(zip(seg[0::2], seg[1::2]))  # [(x1, y1), (x2, y2), ...]
-                                polygon = Polygon(coords)
-                            else:
-                                # すでに [[x1, y1, x2, y2, ...]] 形式の場合（複数ポリゴン）
-                                polygon = MultiPolygon([
-                                    Polygon(list(zip(poly[0::2], poly[1::2]))) for poly in seg
-                                ])
-                        except Exception as e:
-                            print(f"Warning: Invalid segmentation data for {img_filename}: {e}")
-                            print(ann['segmentation'])
-                            continue
-                        # exit()
-                        # Pass the scale_factor from the dataset instance
-                        temp_mask = segmentation_to_mask(ann['segmentation'], img_shape, self.scale_factor)
-                        poly_mask[temp_mask > 0] = 1
-                    # --- End WKT/COCO ---
-                    if np.any(poly_mask):
-                        instance_id += 1
-                        labels[(poly_mask > 0) & (labels == 0)] = instance_id
-                except Exception as e:
-                    print(f"Error processing annotation for {img_filename}: {e}. Data: {ann.get('segmentation', 'N/A')}") # Use .get for safety
-        # --- (End Instance Label Map Generation) ---
-
-        # 1. Field mask (footprint)
-        field_mask = (labels > 0).astype(np.uint8)
-
-        # 2. Edge mask
-        edge_mask = np.zeros(img_shape, dtype=np.uint8)
-        if self.edge_width > 0 and instance_id > 0:
-            # Use square kernel for consistency with process_image logic if desired
-            selem_edge = footprint_rectangle((self.edge_width, self.edge_width))
-            # Or use footprint_rectangle as before:
-            # from skimage.morphology import footprint_rectangle
-            # selem_edge = footprint_rectangle((self.edge_width, self.edge_width))
-            for i in range(1, instance_id + 1):
-                instance_mask = (labels == i)
-                if np.any(instance_mask):
-                    try:
-                        eroded_mask = erosion(instance_mask, selem_edge)
-                        edge = instance_mask ^ eroded_mask # XOR
-                        edge_mask[edge] = 1 # Accumulate edges
-                    except Exception as e:
-                        print(f"Warning: Error during edge erosion for instance {i} in {img_filename}: {e}")
-
-        # 3. Contact mask (Modified Logic)
-        contact_mask = np.zeros(img_shape, dtype=np.uint8)
-        if self.contact_width > 0 and instance_id > 1: # Need >= 2 instances
-            # Use square kernel for consistency if edge_mask used square
-            selem_contact = footprint_rectangle((self.contact_width, self.contact_width))
-            # Or use footprint_rectangle as before:
-            # from skimage.morphology import footprint_rectangle
-            # selem_contact = footprint_rectangle((self.contact_width, self.contact_width))
+            # Load 12-band image
             try:
-                # Dilate the field mask
-                dilated_field = dilation(field_mask, selem_contact)
-
-                # Prepare markers for watershed
-                markers = labels.copy()
-                markers[~dilated_field] = 0 # Clear markers outside dilated area
-
-                # Run watershed
-                ws_labels = watershed(dilated_field, markers, mask=dilated_field, watershed_line=True)
-
-                # Identify watershed lines (potential boundaries)
-                watershed_lines = (ws_labels == 0) & dilated_field # Boolean mask
-
-                # >>> MODIFICATION START <<<
-                # Combine watershed lines with edge mask
-                # Ensure edge_mask is boolean for bitwise OR
-                combined_boundaries = watershed_lines | (edge_mask > 0)
-
-                # Dilate the combined boundaries
-                dilated_boundaries = dilation(combined_boundaries, selem_contact)
-
-                # Use the dilated boundaries as candidates for contact points
-                contact_mask_candidates = dilated_boundaries
-                # >>> MODIFICATION END <<<
-
-                # Verify candidates by checking neighbors in the original labels map
-                coords = np.argwhere(contact_mask_candidates) # Use the new candidates
-                for y, x in coords:
-                     # Check 3x3 neighborhood in original labels
-                     y_min, y_max = max(0, y - 1), min(img_shape[0], y + 2)
-                     x_min, x_max = max(0, x - 1), min(img_shape[1], x + 2)
-                     neighborhood = labels[y_min:y_max, x_min:x_max]
-                     # Get unique non-zero labels in the neighborhood
-                     unique_labels_in_neighborhood = np.unique(neighborhood[neighborhood > 0])
-                     # If more than one unique label exists, it's a contact point
-                     if len(unique_labels_in_neighborhood) > 1:
-                         contact_mask[y, x] = 1
+                with rasterio.open(img_path) as src:
+                    img = src.read().astype(np.float32) # (C, H, W)
+                    img_shape = (src.height, src.width)
             except Exception as e:
-                print(f"Warning: Error during contact mask generation for {img_filename}: {e}")
-                # contact_mask remains zeros if an error occurs
+                print(f"Error loading image {img_path}: {e}")
+                raise IOError(f"Could not read image file {img_path}") from e
 
-    
+            if img.ndim != 3 or img.shape[1:] != img_shape:
+                raise ValueError(f"Image {img_path} has unexpected shape: {img.shape}, expected (C, {img_shape[0]}, {img_shape[1]})")
 
-        # --- Stack and finalize masks ---
-        if not (field_mask.shape == edge_mask.shape == contact_mask.shape == img_shape):
-            raise ValueError(f"Mask shape mismatch for {img_filename}")
+            num_channels = img.shape[0]
+            original_height, original_width = img_shape
+
+            # --- Stage 1 Resize based on scale_factor ---
+            if self.scale_factor != 1.0:
+                target_h = int(original_height * self.scale_factor)
+                target_w = int(original_width * self.scale_factor)
+                img_hwc = img.transpose((1, 2, 0))
+                img_resized_hwc = cv2.resize(img_hwc, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                if img_resized_hwc.ndim == 2: img_resized_hwc = np.expand_dims(img_resized_hwc, axis=-1)
+                img = img_resized_hwc.transpose((2, 0, 1))
+                img_shape = (target_h, target_w) # Update shape for masks
+            
+            # target_h = int(original_height * self.scale_factor)
+            # target_w = int(original_width * self.scale_factor)
+            # img_shape = (target_h, target_w)
+            # print(f"Using original image shape: C={img.shape[0]}, H={img_shape[0]}, W={img_shape[1]}")
+
+            # --- Normalize image ---
+            if self.mean is not None and self.std is not None:
+                if self.mean.shape[0] != num_channels or self.std.shape[0] != num_channels:
+                    raise ValueError(f"Mean/std channel mismatch for {img_filename}")
+                img = (img - self.mean) / (self.std + 1e-6)
+            else:
+                img_mean = img.mean(axis=(1, 2), keepdims=True)
+                img_std = img.std(axis=(1, 2), keepdims=True)
+                img = (img - img_mean) / (img_std + 1e-6)
+
+            # --- Mask Generation ---
+            img_annotations = self.annotations.get(img_filename, [])
+            labels = np.zeros(img_shape, dtype=np.uint16)
+            instance_id = 0
+            # --- (Instance Label Map Generation - same as before) ---
+            for ann in img_annotations:
+                if not isinstance(ann, dict) or 'class' not in ann or 'segmentation' not in ann: continue
+                if ann['class'] == 'field' and ann['segmentation']:
+                    poly_mask = np.zeros(img_shape, dtype=np.uint8)
+                    try:
+                        # --- WKT/COCO Polygon Processing (same as before) ---
+                        if isinstance(ann['segmentation'], str): # WKT
+                            polygon = wkt_loads(ann['segmentation'])
+                            coords_list = []
+                            if polygon.geom_type == 'MultiPolygon':
+                                for poly in polygon.geoms:
+                                    coords = np.array(mapping(poly)['coordinates'][0]).round().astype(np.int32)
+                                    if coords.shape[0] >= 3: coords_list.append(coords)
+                            elif polygon.geom_type == 'Polygon':
+                                coords = np.array(mapping(polygon)['coordinates'][0]).round().astype(np.int32)
+                                if coords.shape[0] >= 3: coords_list.append(coords)
+                            if coords_list: cv2.fillPoly(poly_mask, coords_list, 1)
+                        elif isinstance(ann['segmentation'], (list, tuple)): # COCO list
+                            # check if segmentation is suit as Polygon
+                            try:
+                                # フラットリストを (x, y) のペアに変換
+                                seg = ann['segmentation']
+                                if all(isinstance(x, (int, float)) for x in seg):
+                                    if len(seg) % 2 != 0:
+                                        raise ValueError("Segmentation list must contain even number of coordinates.")
+                                    coords = list(zip(seg[0::2], seg[1::2]))  # [(x1, y1), (x2, y2), ...]
+                                    polygon = Polygon(coords)
+                                else:
+                                    # すでに [[x1, y1, x2, y2, ...]] 形式の場合（複数ポリゴン）
+                                    polygon = MultiPolygon([
+                                        Polygon(list(zip(poly[0::2], poly[1::2]))) for poly in seg
+                                    ])
+                            except Exception as e:
+                                print(f"Warning: Invalid segmentation data for {img_filename}: {e}")
+                                print(ann['segmentation'])
+                                continue
+                            # exit()
+                            # Pass the scale_factor from the dataset instance
+                            temp_mask = segmentation_to_mask(ann['segmentation'], img_shape, self.scale_factor)
+                            poly_mask[temp_mask > 0] = 1
+                        # --- End WKT/COCO ---
+                        if np.any(poly_mask):
+                            instance_id += 1
+                            labels[(poly_mask > 0) & (labels == 0)] = instance_id
+                    except Exception as e:
+                        print(f"Error processing annotation for {img_filename}: {e}. Data: {ann.get('segmentation', 'N/A')}") # Use .get for safety
+            # --- (End Instance Label Map Generation) ---
+            # 1. Field mask (footprint)
+            field_mask = (labels > 0).astype(np.uint8)
+
+            # 2. Edge mask
+            edge_mask = np.zeros(img_shape, dtype=np.uint8)
+            if self.edge_width > 0 and instance_id > 0:
+                # Use square kernel for consistency with process_image logic if desired
+                selem_edge = footprint_rectangle((self.edge_width, self.edge_width))
+                # Or use footprint_rectangle as before:
+                # from skimage.morphology import footprint_rectangle
+                # selem_edge = footprint_rectangle((self.edge_width, self.edge_width))
+                for i in range(1, instance_id + 1):
+                    instance_mask = (labels == i)
+                    if np.any(instance_mask):
+                        try:
+                            eroded_mask = erosion(instance_mask, selem_edge)
+                            edge = instance_mask ^ eroded_mask # XOR
+                            edge_mask[edge] = 1 # Accumulate edges
+                        except Exception as e:
+                            print(f"Warning: Error during edge erosion for instance {i} in {img_filename}: {e}")
+
+            # 3. Contact mask (Modified Logic)
+            contact_mask = np.zeros(img_shape, dtype=np.uint8)
+            if self.contact_width > 0 and instance_id > 1: # Need >= 2 instances
+                # Use square kernel for consistency if edge_mask used square
+                selem_contact = footprint_rectangle((self.contact_width, self.contact_width))
+                # Or use footprint_rectangle as before:
+                # from skimage.morphology import footprint_rectangle
+                # selem_contact = footprint_rectangle((self.contact_width, self.contact_width))
+                try:
+                    # Dilate the field mask
+                    dilated_field = dilation(field_mask, selem_contact)
+
+                    # Prepare markers for watershed
+                    markers = labels.copy()
+                    markers[~dilated_field] = 0 # Clear markers outside dilated area
+
+                    # Run watershed
+                    ws_labels = watershed(dilated_field, markers, mask=dilated_field, watershed_line=True)
+
+                    # Identify watershed lines (potential boundaries)
+                    watershed_lines = (ws_labels == 0) & dilated_field # Boolean mask
+
+                    # >>> MODIFICATION START <<<
+                    # Combine watershed lines with edge mask
+                    # Ensure edge_mask is boolean for bitwise OR
+                    combined_boundaries = watershed_lines | (edge_mask > 0)
+
+                    # Dilate the combined boundaries
+                    dilated_boundaries = dilation(combined_boundaries, selem_contact)
+
+                    # Use the dilated boundaries as candidates for contact points
+                    contact_mask_candidates = dilated_boundaries
+                    # >>> MODIFICATION END <<<
+
+                    # Verify candidates by checking neighbors in the original labels map
+                    coords = np.argwhere(contact_mask_candidates) # Use the new candidates
+                    for y, x in coords:
+                        # Check 3x3 neighborhood in original labels
+                        y_min, y_max = max(0, y - 1), min(img_shape[0], y + 2)
+                        x_min, x_max = max(0, x - 1), min(img_shape[1], x + 2)
+                        neighborhood = labels[y_min:y_max, x_min:x_max]
+                        # Get unique non-zero labels in the neighborhood
+                        unique_labels_in_neighborhood = np.unique(neighborhood[neighborhood > 0])
+                        # If more than one unique label exists, it's a contact point
+                        if len(unique_labels_in_neighborhood) > 1:
+                            contact_mask[y, x] = 1
+                except Exception as e:
+                    print(f"Warning: Error during contact mask generation for {img_filename}: {e}")
+                    # contact_mask remains zeros if an error occurs
+
         
-        # # Save masks for debugging
-        # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/field_{img_path.split("/")[-1].replace(".tif","")}.png', field_mask * 255)  # Save field mask as PNG (0-255)
-        # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/edge_{img_path.split('/')[-1].replace(".tif","")}.png', edge_mask * 255)  # Save edge mask as PNG (0-255)
-        # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/contact_{img_path.split("/")[-1].replace(".tif","")}.png', contact_mask * 255)  # Save contact mask as PNG (0-255)
-        # Stack masks: (3, H, W)
-        mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8)
-        # 3クラスのマスクを作成 (0: 背景, 1: field, 2: contact, 3: edge)し、red, blue, greenにして保存
-        mask_ = np.stack([field_mask, contact_mask, edge_mask], axis=0).astype(np.uint8) # (3, H, W)
-        # Save the combined mask as PNG (0-255)
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/combined_{img_path.split("/")[-1].replace(".tif","")}.png', mask_.transpose((1, 2, 0)) * 255)  # Save combined mask as PNG (0-255)
 
+            # --- Stack and finalize masks ---
+            if not (field_mask.shape == edge_mask.shape == contact_mask.shape == img_shape):
+                raise ValueError(f"Mask shape mismatch for {img_filename}")
+            
+            # # Save masks for debugging
+            # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/field_{img_path.split("/")[-1].replace(".tif","")}.png', field_mask * 255)  # Save field mask as PNG (0-255)
+            # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/edge_{img_path.split('/')[-1].replace(".tif","")}.png', edge_mask * 255)  # Save edge mask as PNG (0-255)
+            # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/contact_{img_path.split("/")[-1].replace(".tif","")}.png', contact_mask * 255)  # Save contact mask as PNG (0-255)
+            # Stack masks: (3, H, W)
+            mask = np.stack([field_mask, edge_mask, contact_mask], axis=0).astype(np.uint8)
+            # 3クラスのマスクを作成 (0: 背景, 1: field, 2: contact, 3: edge)し、red, blue, greenにして保存
+            mask_ = np.stack([field_mask, contact_mask, edge_mask], axis=0).astype(np.uint8) # (3, H, W)
+            # Save the combined mask as PNG (0-255)
+            cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/combined_{img_path.split("/")[-1].replace(".tif","")}.png', mask_.transpose((1, 2, 0)) * 255)  # Save combined mask as PNG (0-255)
+
+            # --- Save to cache ---
+            os.makedirs(CACHE_DIR, exist_ok=True)  # Create cache directory if it doesn't exist
+            np.savez_compressed(cache_path, img=img, mask=mask)
+            
         # --- Resize masks if image was resized (using updated img_shape) ---
         if self.scale_factor != 1.0:
             target_h, target_w = img_shape # Already updated
             resized_mask_channels = []
             for i in range(mask.shape[0]):
-                 # Use INTER_NEAREST for masks to preserve 0/1 values
-                 resized_ch = cv2.resize(mask[i], (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-                 resized_mask_channels.append(resized_ch)
+                # Use INTER_NEAREST for masks to preserve 0/1 values
+                resized_ch = cv2.resize(mask[i], (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+                resized_mask_channels.append(resized_ch)
             mask = np.stack(resized_mask_channels, axis=0)
         print("Final mask shape:", mask.shape,f"{ img_shape= }")
 
         # Scale mask values to 0-255 AFTER potential resizing
         mask = mask * 255
-        cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/train_{img_path.split("/")[-1].replace(".tif","")}.png', mask.transpose((1, 2, 0)) )  # Save combined mask as PNG (0-255)
-
+        # cv2.imwrite(f'/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/train_{img_path.split("/")[-1].replace(".tif","")}.png', mask.transpose((1, 2, 0)) )  # Save combined mask as PNG (0-255)
+            
         # --- Apply transformations ---
         if self.transform:
             try:
@@ -378,5 +400,4 @@ class FieldSegmentationDataset(Dataset):
                  f"This likely happened after transformations or resizing. "
                  f"Check transform pipeline and interpolation methods."
              )
-
         return img_tensor, mask_tensor

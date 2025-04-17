@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast,GradScaler
+from torch.cuda.amp import autocast, GradScaler
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
 import numpy as np
-import cv2 # Import OpenCV
+import cv2  # Import OpenCV
 import os
 import shutil
 import rasterio
@@ -16,7 +16,7 @@ from torchsummary import summary
 
 # Assuming FieldSegmentationDataset is defined in utils.dataset and UNet in models.unet_maxvit
 # Adjust imports based on your actual project structure if different
-from utils.dataset import FieldSegmentationDataset # Corrected class name
+from utils.dataset import FieldSegmentationDataset  # Corrected class name
 from models.unet_maxvit import UNet
 
 
@@ -28,25 +28,26 @@ def dice_coeff(pred, target, smooth=1.0, epsilon=1e-6):
     pred = torch.sigmoid(pred)
 
     # Flatten spatial dimensions
-    pred_flat = pred.view(pred.shape[0], pred.shape[1], -1) # (N, C, H*W)
-    target_flat = target.view(target.shape[0], target.shape[1], -1) # (N, C, H*W)
+    pred_flat = pred.view(pred.shape[0], pred.shape[1], -1)  # (N, C, H*W)
+    target_flat = target.view(target.shape[0], target.shape[1], -1)  # (N, C, H*W)
 
-    intersection = (pred_flat * target_flat).sum(2) # (N, C)
-    pred_sum = pred_flat.sum(2) # (N, C)
-    target_sum = target_flat.sum(2) # (N, C)
+    intersection = (pred_flat * target_flat).sum(2)  # (N, C)
+    pred_sum = pred_flat.sum(2)  # (N, C)
+    target_sum = target_flat.sum(2)  # (N, C)
 
-    dice = (2. * intersection + smooth) / (pred_sum + target_sum + smooth + epsilon) # (N, C)
+    dice = (2.0 * intersection + smooth) / (pred_sum + target_sum + smooth + epsilon)  # (N, C)
 
-    return dice # Return per-class dice score for the batch
+    return dice  # Return per-class dice score for the batch
+
 
 def dice_loss(pred, target, smooth=1.0, epsilon=1e-6):
     """Calculates Dice Loss (average over classes)."""
-    dice_coeffs = dice_coeff(pred, target, smooth, epsilon) # (N, C)
+    dice_coeffs = dice_coeff(pred, target, smooth, epsilon)  # (N, C)
     # Average dice score across classes, then subtract from 1
     return 1.0 - dice_coeffs.mean()
 
 
-def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5, dice_weight=0.5):
+def train_model(model, dataloader, num_epochs=10, device="cuda", bce_weight=0.5, dice_weight=0.5):
     """
     Trains the U-Net model using BCE + Dice loss.
 
@@ -58,26 +59,27 @@ def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5,
         bce_weight (float): Weight for BCE loss.
         dice_weight (float): Weight for Dice loss.
     """
-    if not torch.cuda.is_available() and device == 'cuda':
+    if not torch.cuda.is_available() and device == "cuda":
         print("CUDA not available, switching to CPU.")
-        device = 'cpu'
+        device = "cpu"
     model.to(device)
 
     # Use BCEWithLogitsLoss (reduction='mean' is simpler here)
-    criterion_bce = nn.BCEWithLogitsLoss() # Default reduction='mean'
+    criterion_bce = nn.BCEWithLogitsLoss()  # Default reduction='mean'
     # No need for separate Dice criterion instance if using the function directly
 
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4,weight_decay=1e-2)
-    scaler = torch.amp.GradScaler('cuda') 
-    
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
+    scaler = torch.amp.GradScaler("cuda")
 
-    print(f"Starting training on {device} for {num_epochs} epochs (BCE weight: {bce_weight}, Dice weight: {dice_weight})...")
+    print(
+        f"Starting training on {device} for {num_epochs} epochs (BCE weight: {bce_weight}, Dice weight: {dice_weight})..."
+    )
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
         running_bce_loss = 0.0
         running_dice_loss = 0.0
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False)
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}", leave=False)
 
         for batch in progress_bar:
             if batch is None:
@@ -87,14 +89,14 @@ def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5,
             # Modify dataset __getitem__ to return filename if needed for safer inference later
             # Assuming batch now contains: imgs, masks (and potentially filename)
             # Example: imgs, masks, _ = batch # If filename is returned
-            imgs, masks = batch # Assuming original return format for now
+            imgs, masks = batch  # Assuming original return format for now
 
             imgs = imgs.to(device)
             # Ensure masks are FloatTensor for loss functions and scale to 0.0-1.0
             masks = masks.to(device, dtype=torch.float) / 255.0
 
             optimizer.zero_grad()
-            
+
             with torch.amp.autocast(device_type=device, dtype=torch.bfloat16):
                 # Forward pass
                 outputs = model(imgs)
@@ -111,7 +113,7 @@ def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5,
                 loss_bce = criterion_bce(outputs, masks)
 
                 # Calculate Dice loss (averaged over classes)
-                loss_dice = dice_loss(outputs, masks) # Pass raw logits to dice_loss
+                loss_dice = dice_loss(outputs, masks)  # Pass raw logits to dice_loss
 
                 # Combine losses
                 total_loss = bce_weight * loss_bce + dice_weight * loss_dice
@@ -120,14 +122,14 @@ def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5,
             scaler.scale(total_loss).backward()
             scaler.step(optimizer)
             scaler.update()
-            
+
             # total_loss,loss_bce,loss_dixeのうちnanが出た場合は,ファイル名を出力
             if torch.isnan(total_loss) or torch.isnan(loss_bce) or torch.isnan(loss_dice):
-                print(f"NaN loss encountered in epoch {epoch+1}.")
+                print(f"NaN loss encountered in epoch {epoch + 1}.")
                 # Assuming filename is part of the batch
                 # print(f"Filename: {batch[2]}") # Uncomment if filename is returned in batch
                 continue
-            
+
             running_loss += total_loss.item()
             running_bce_loss += loss_bce.item()
             running_dice_loss += loss_dice.item()
@@ -136,37 +138,39 @@ def train_model(model, dataloader, num_epochs=10, device='cuda', bce_weight=0.5,
         avg_loss = running_loss / len(dataloader)
         avg_bce_loss = running_bce_loss / len(dataloader)
         avg_dice_loss = running_dice_loss / len(dataloader)
-        print(f"Epoch {epoch+1} Avg Loss: {avg_loss:.4f} (BCE: {avg_bce_loss:.4f}, Dice: {avg_dice_loss:.4f})")
+        print(f"Epoch {epoch + 1} Avg Loss: {avg_loss:.4f} (BCE: {avg_bce_loss:.4f}, Dice: {avg_dice_loss:.4f})")
 
     print("Training finished.")
 
 
 if __name__ == "__main__":
     # --- Configuration ---
-    ROOT_DIR = '/workspace/projects/solafune-field-area-segmentation'
-    EX_NUM = 'ex1' # Example experiment number
-    IMAGE_DIR = os.path.join(ROOT_DIR, 'data/train_images_mini') # Path to training images (adjust if needed)
-    ANNOTATION_FILE = os.path.join(ROOT_DIR, 'data/train_annotation.json') # Path to training annotations (adjust if needed)
-    OUTPUT_DIR = os.path.join(ROOT_DIR, 'outputs',EX_NUM,'check') # Path to save model outputs
-    BACKBONE = 'maxvit_small_tf_512.in1k' # Example backbone
-    NUM_OUTPUT_CHANNELS = 3 # Number of output channels (field, edge, contact)
+    ROOT_DIR = "/workspace/projects/solafune-field-area-segmentation"
+    EX_NUM = "ex1"  # Example experiment number
+    IMAGE_DIR = os.path.join(ROOT_DIR, "data/train_images_mini")  # Path to training images (adjust if needed)
+    ANNOTATION_FILE = os.path.join(
+        ROOT_DIR, "data/train_annotation.json"
+    )  # Path to training annotations (adjust if needed)
+    OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM, "check")  # Path to save model outputs
+    BACKBONE = "maxvit_small_tf_512.in1k"  # Example backbone
+    NUM_OUTPUT_CHANNELS = 3  # Number of output channels (field, edge, contact)
     PRETRAINED = True
-    BATCH_SIZE = 2 # Adjust based on GPU memory
-    NUM_WORKERS = 4 # Adjust based on CPU cores
-    NUM_EPOCHS = 500 # Number of training epochs
-    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    INPUT_H = 512 # Example, not directly used if RandomCrop is applied
-    INPUT_W = 512 # Example, not directly used if RandomCrop is applied
-    SCALE_FACTOR = 3 # Resize scale factor for initial loading in dataset
-    CROP_H = 512 # Height after RandomCrop
-    CROP_W = 512 # Width after RandomCrop
-    RESIZE_H = 1024 # Height after Resize transform (model input)
-    RESIZE_W = 1024 # Width after Resize transform (model input)
+    BATCH_SIZE = 2  # Adjust based on GPU memory
+    NUM_WORKERS = 4  # Adjust based on CPU cores
+    NUM_EPOCHS = 500  # Number of training epochs
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    INPUT_H = 512  # Example, not directly used if RandomCrop is applied
+    INPUT_W = 512  # Example, not directly used if RandomCrop is applied
+    SCALE_FACTOR = 3  # Resize scale factor for initial loading in dataset
+    CROP_H = 512  # Height after RandomCrop
+    CROP_W = 512  # Width after RandomCrop
+    RESIZE_H = 1024  # Height after Resize transform (model input)
+    RESIZE_W = 1024  # Width after Resize transform (model input)
     # Pre-calculated mean/std (Example values - REPLACE WITH YOUR ACTUAL VALUES)
     # These should be calculated across your entire training dataset for all 12 channels
     # Example: DATASET_MEAN = [0.1, 0.1, ..., 0.1] # List of 12 means
     # Example: DATASET_STD = [0.05, 0.05, ..., 0.05] # List of 12 stds
-    DATASET_MEAN = None # Set to None to use per-image normalization if not pre-calculated
+    DATASET_MEAN = None  # Set to None to use per-image normalization if not pre-calculated
     DATASET_STD = None  # Set to None to use per-image normalization if not pre-calculated
     # Loss weights
     BCE_WEIGHT = 0.5
@@ -176,63 +180,74 @@ if __name__ == "__main__":
     print("Setting up dataset and dataloader...")
     # Define transformations including the required resize
     # Note: Normalization is handled inside the Dataset class now
-    
+
     # MaxViTモデルは入力サイズが16の倍数である必要があるため、それに合わせて調整
     # 各画像のサイズは異なるため、PadIfNeededを使用して16の倍数にパディング
-    transform = A.Compose([
-        # 512x512の領域をrandom_crop
-        A.RandomCrop(height=CROP_H, width=CROP_W, p=1.0),
-        # Resize to 1024x1024
-        A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST),
-        # 16の倍数になるようにパディング（min_heightとmin_widthは16の倍数に切り上げ）
-        # A.PadIfNeeded(
-        #     min_height=16 * ((RESIZE_H + 15) // 16),
-        #     min_width=16 * ((RESIZE_W + 15) // 16),
-        #     border_mode=cv2.BORDER_CONSTANT
-        # ),
-        # Add other augmentations here if needed (e.g., Flip, Rotate)
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
-        ToTensorV2(), # Converts image HWC->CHW, mask HWC->CHW, scales image 0-255 -> 0-1 (mask remains 0 or 255 uint8)
-    ])
-    
+    transform = A.Compose(
+        [
+            # 512x512の領域をrandom_crop
+            A.RandomCrop(height=CROP_H, width=CROP_W, p=1.0),
+            # Resize to 1024x1024
+            A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST),
+            # 16の倍数になるようにパディング（min_heightとmin_widthは16の倍数に切り上げ）
+            # A.PadIfNeeded(
+            #     min_height=16 * ((RESIZE_H + 15) // 16),
+            #     min_width=16 * ((RESIZE_W + 15) // 16),
+            #     border_mode=cv2.BORDER_CONSTANT
+            # ),
+            # Add other augmentations here if needed (e.g., Flip, Rotate)
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            ToTensorV2(),  # Converts image HWC->CHW, mask HWC->CHW, scales image 0-255 -> 0-1 (mask remains 0 or 255 uint8)
+        ]
+    )
+
     print(f"Images will be resized to {RESIZE_H}x{RESIZE_W} and padded to ensure dimensions are divisible by 16")
-    
-       
+
     # Save masks for debugging
-    if os.path.exists(f'/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check'):
+    if os.path.exists(f"/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check"):
         try:
             # Remove existing check directory if it exists
             # 1. Remove existing directory
-            shutil.rmtree(f'/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check', ignore_errors=True)
-            os.makedirs(f'/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check', exist_ok=True) 
+            shutil.rmtree(
+                f"/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check", ignore_errors=True
+            )
+            os.makedirs(f"/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check", exist_ok=True)
         except Exception as e:
             print(f"Error removing existing check directory: {e}")
     else:
         # 2. Create new directory
-        os.makedirs(f'/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check', exist_ok=True) 
+        os.makedirs(f"/workspace/projects/solafune-field-area-segmentation/outputs/{EX_NUM}/check", exist_ok=True)
         print(f"Output directory created: {OUTPUT_DIR}")
     # Ensure FieldSegmentationDataset is correctly implemented and paths/file are valid
     try:
         # Initialize dataset with paths, mean/std, and transform
         dataset = FieldSegmentationDataset(
             img_dir=IMAGE_DIR,
-            ann_json_path=ANNOTATION_FILE, # Corrected parameter name
-            scale_factor=SCALE_FACTOR,     # Pass scale_factor
+            ann_json_path=ANNOTATION_FILE,  # Corrected parameter name
+            scale_factor=SCALE_FACTOR,  # Pass scale_factor
             transform=transform,
             # edge_width and contact_width use defaults if not specified
             contact_width=5,
             edge_width=3,
-            mean=DATASET_MEAN, # Pass pre-calculated mean
-            std=DATASET_STD   # Pass pre-calculated std
+            mean=DATASET_MEAN,  # Pass pre-calculated mean
+            std=DATASET_STD,  # Pass pre-calculated std
         )
 
         if len(dataset) == 0:
-             print(f"Error: Dataset is empty. Check image path '{IMAGE_DIR}' and annotation file '{ANNOTATION_FILE}', and ensure they contain matching, valid data.")
-             # Exit if dataset is empty, as dummy data generation is complex here
-             exit()
+            print(
+                f"Error: Dataset is empty. Check image path '{IMAGE_DIR}' and annotation file '{ANNOTATION_FILE}', and ensure they contain matching, valid data."
+            )
+            # Exit if dataset is empty, as dummy data generation is complex here
+            exit()
         print(f"Dataset initialized with {len(dataset)} samples.")
-        dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, pin_memory=True if DEVICE == 'cuda' else False)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=BATCH_SIZE,
+            shuffle=True,
+            num_workers=NUM_WORKERS,
+            pin_memory=True if DEVICE == "cuda" else False,
+        )
         print(f"Dataset size: {len(dataset)}, Dataloader ready.")
 
         print("Initializing model...")
@@ -243,20 +258,24 @@ if __name__ == "__main__":
         print(f"Model: UNet with {BACKBONE} backbone, {NUM_OUTPUT_CHANNELS} output channels.")
 
         # Start training
-        train_model(model, dataloader, num_epochs=NUM_EPOCHS, device=DEVICE, bce_weight=BCE_WEIGHT, dice_weight=DICE_WEIGHT)
-        
+        train_model(
+            model, dataloader, num_epochs=NUM_EPOCHS, device=DEVICE, bce_weight=BCE_WEIGHT, dice_weight=DICE_WEIGHT
+        )
+
         # Save the model after training
         if not os.path.exists(OUTPUT_DIR):
             os.makedirs(OUTPUT_DIR)
             print(f"Output directory {OUTPUT_DIR} created.")
         else:
             print(f"Output directory {OUTPUT_DIR} already exists. Model will be saved there.")
-        torch.save(model.state_dict(), os.path.join(OUTPUT_DIR,'model.path'))
+        torch.save(model.state_dict(), os.path.join(OUTPUT_DIR, "model.path"))
         print(f"Model saved to {OUTPUT_DIR}")
 
     except NameError:
-         print("Error: FieldSegmentationDataset or UNet class not found. Ensure 'src' is in PYTHONPATH or run from the project root. Cannot run training.")
+        print(
+            "Error: FieldSegmentationDataset or UNet class not found. Ensure 'src' is in PYTHONPATH or run from the project root. Cannot run training."
+        )
     except FileNotFoundError as e:
-         print(f"Error: File or directory not found. Please check paths. Details: {e}")
+        print(f"Error: File or directory not found. Please check paths. Details: {e}")
     except Exception as e:
-         print(f"An unexpected error occurred during setup or training: {e}")
+        print(f"An unexpected error occurred during setup or training: {e}")

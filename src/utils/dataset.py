@@ -1,21 +1,23 @@
-import os
 import json
-import numpy as np
-import torch
-from torch.utils.data import Dataset
-import rasterio
+import os
+
 import cv2
+import numpy as np
+import rasterio
+import torch
+from shapely.geometry import MultiPolygon, Polygon, mapping  # To convert polygon to coordinates
 from shapely.wkt import loads as wkt_loads
-from shapely.geometry import mapping, Polygon, MultiPolygon  # To convert polygon to coordinates
 from skimage.morphology import (
-    erosion,
     dilation,
+    erosion,
     footprint_rectangle,
 )  # Using footprint_rectangle instead of deprecated square
 
 # footprint_rectangle is also fine, choose one consistently
 # from skimage.morphology import footprint_rectangle
 from skimage.segmentation import watershed
+from torch.utils.data import Dataset
+
 # from skimage.measure import label as skimage_label # Not used in this implementation
 
 # キャッシュファイルのディレクトリ
@@ -103,10 +105,10 @@ class FieldSegmentationDataset(Dataset):
             self.mean, self.std = None, None
 
         try:
-            with open(ann_json_path, "r") as f:
+            with open(ann_json_path) as f:
                 ann_data = json.load(f)
         except Exception as e:
-            raise IOError(f"Error reading annotation file {ann_json_path}: {e}") from e
+            raise OSError(f"Error reading annotation file {ann_json_path}: {e}") from e
 
         if "images" not in ann_data or not isinstance(ann_data["images"], list):
             raise ValueError(f"Invalid annotation format in {ann_json_path}")
@@ -163,7 +165,7 @@ class FieldSegmentationDataset(Dataset):
                     img_shape = (src.height, src.width)
             except Exception as e:
                 print(f"Error loading image {img_path}: {e}")
-                raise IOError(f"Could not read image file {img_path}") from e
+                raise OSError(f"Could not read image file {img_path}") from e
 
             if img.ndim != 3 or img.shape[1:] != img_shape:
                 raise ValueError(

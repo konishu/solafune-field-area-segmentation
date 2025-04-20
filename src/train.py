@@ -1,23 +1,18 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-from tqdm import tqdm
-import numpy as np
-import cv2  # Import OpenCV
 import os
 import shutil
-import rasterio
-from torchsummary import summary
 
+import albumentations as A
+import cv2  # Import OpenCV
+import torch
+from albumentations.pytorch import ToTensorV2
+from models.unet_maxvit import UNet
+from torch import nn, optim
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 # Assuming FieldSegmentationDataset is defined in utils.dataset and UNet in models.unet_maxvit
 # Adjust imports based on your actual project structure if different
 from utils.dataset import FieldSegmentationDataset  # Corrected class name
-from models.unet_maxvit import UNet
 
 
 # --- Dice Loss 実装 ---

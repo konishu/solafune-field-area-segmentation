@@ -15,3 +15,5 @@ sandbox/*
 data/*
 outputs/models/*
 outputs/ex*
+src/nohup*
+

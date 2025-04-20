@@ -1,16 +1,16 @@
-import torch
-import torch.nn as nn
+
+import albumentations as A
 import cv2
 import numpy as np
-import albumentations as A
+import torch
 from albumentations.pytorch import ToTensorV2
-import os
+from torch import nn
 
 # Assuming FieldSegmentationDataset is defined in utils.dataset and UNet in models.unet_maxvit
 # Adjust imports based on your actual project structure if different
 try:
-    from utils.dataset import FieldSegmentationDataset  # Corrected class name
     from models.unet_maxvit import UNet
+    from utils.dataset import FieldSegmentationDataset  # Corrected class name
 except ImportError:
     print(
         "Warning: Could not import CustomDataset or UNet. Ensure they are defined in the correct paths (src/utils/dataset.py and src/models/unet_maxvit.py)"

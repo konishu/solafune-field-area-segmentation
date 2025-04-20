@@ -23,6 +23,26 @@ from torch.utils.data import Dataset
 # キャッシュファイルのディレクトリ
 CACHE_DIR = "/workspace/projects/solafune-field-area-segmentation/data/cache"
 
+def fill_nan_pixels(img):
+    """Fill NaN pixels with the mean of their valid neighbors."""
+    for c in range(img.shape[0]):  # 各チャネルについて
+        nan_mask = np.isnan(img[c])
+        if np.any(nan_mask):  # NaNピクセルが存在する場合
+            coords = np.argwhere(nan_mask)
+            for y, x in coords:
+                # 有効な近傍ピクセルの値を取得
+                neighbors = []
+                for dy in [-1, 0, 1]:
+                    for dx in [-1, 0, 1]:
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < img.shape[1] and 0 <= nx < img.shape[2] and not np.isnan(img[c, ny, nx]):
+                            neighbors.append(img[c, ny, nx])
+                # 近傍ピクセルの平均値で補完 (近傍がない場合は0で補完)
+                if neighbors:
+                    img[c, y, x] = np.mean(neighbors)
+                else:
+                    img[c, y, x] = 0
+    return img
 
 # Helper function to convert COCO segmentation format to mask
 def segmentation_to_mask(segmentation, shape, scale_factor=1.0):
@@ -145,7 +165,7 @@ class FieldSegmentationDataset(Dataset):
         img_path = os.path.join(self.img_dir, img_filename)
         cache_path = os.path.join(CACHE_DIR, img_filename.replace(".tif", ".npz"))
         try:
-            print(f"Loading from cache: {cache_path}")
+            # print(f"Loading from cache: {cache_path}")
             loaded = np.load(cache_path)
             img = loaded["img"]
             mask = loaded["mask"]
@@ -163,6 +183,7 @@ class FieldSegmentationDataset(Dataset):
                 with rasterio.open(img_path) as src:
                     img = src.read().astype(np.float32)  # (C, H, W)
                     img_shape = (src.height, src.width)
+                    
             except Exception as e:
                 print(f"Error loading image {img_path}: {e}")
                 raise OSError(f"Could not read image file {img_path}") from e
@@ -171,7 +192,15 @@ class FieldSegmentationDataset(Dataset):
                 raise ValueError(
                     f"Image {img_path} has unexpected shape: {img.shape}, expected (C, {img_shape[0]}, {img_shape[1]})"
                 )
-
+            
+            # train_38,42にnanがあるので補完
+            nan_mask = True
+            for c in range(img.shape[0]):
+                nan_mask = np.isnan(img[c]) * nan_mask
+            if np.any(nan_mask):
+                print(f"Warning: NaN pixels found in {img_path}. Filling with mean of neighbors.")  
+                img = fill_nan_pixels(img) 
+            
             num_channels = img.shape[0]
             original_height, original_width = img_shape
 
@@ -359,7 +388,7 @@ class FieldSegmentationDataset(Dataset):
                 resized_ch = cv2.resize(mask[i], (target_w, target_h), interpolation=cv2.INTER_NEAREST)
                 resized_mask_channels.append(resized_ch)
             mask = np.stack(resized_mask_channels, axis=0)
-        print("Final mask shape:", mask.shape, f"{ img_shape= }")
+        # print("Final mask shape:", mask.shape, f"{ img_shape= }")
 
         # Scale mask values to 0-255 AFTER potential resizing
         mask = mask * 255
@@ -433,4 +462,4 @@ class FieldSegmentationDataset(Dataset):
                 f"This likely happened after transformations or resizing. "
                 f"Check transform pipeline and interpolation methods."
             )
-        return img_tensor, mask_tensor
+        return img_tensor, mask_tensor, self.img_filenames[idx]

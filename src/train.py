@@ -7,6 +7,7 @@ import torch
 from albumentations.pytorch import ToTensorV2
 from models.unet_maxvit import UNet
 from torch import nn, optim
+from torch.optim import lr_scheduler # Import LR scheduler (LinearLR, CosineAnnealingLR, SequentialLR)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -42,9 +43,22 @@ def dice_loss(pred, target, smooth=1.0, epsilon=1e-6):
     return 1.0 - dice_coeffs.mean()
 
 
-def train_model(model, dataloader, num_epochs=10, device="cuda", bce_weight=0.5, dice_weight=0.5):
+def train_model(
+    model,
+    dataloader,
+    num_epochs=500,
+    device="cuda",
+    bce_weight=0.5,
+    dice_weight=0.5,
+    initial_lr=4e-4, # Add initial_lr parameter
+    warmup_epochs=10, # Add warmup_epochs parameter
+    cosine_decay_epochs=500,
+    min_lr = 1e-6,
+    lr_scheduler_t_max=500, # Add lr_scheduler_t_max parameter
+    lr_scheduler_eta_min=3e-5, # Add lr_scheduler_eta_min parameter
+):
     """
-    Trains the U-Net model using BCE + Dice loss.
+    Trains the U-Net model using BCE + Dice loss with Linear Warmup + Cosine Decay LR schedule.
 
     Args:
         model (nn.Module): The U-Net model to train.
@@ -53,6 +67,9 @@ def train_model(model, dataloader, num_epochs=10, device="cuda", bce_weight=0.5,
         device (str): Device to train on ('cuda' or 'cpu').
         bce_weight (float): Weight for BCE loss.
         dice_weight (float): Weight for Dice loss.
+        initial_lr (float): Initial learning rate for the optimizer.
+        warmup_epochs (int): Number of epochs for linear warmup.
+        lr_scheduler_eta_min (float): Minimum learning rate for CosineAnnealingLR.
     """
     if not torch.cuda.is_available() and device == "cuda":
         print("CUDA not available, switching to CPU.")
@@ -63,12 +80,27 @@ def train_model(model, dataloader, num_epochs=10, device="cuda", bce_weight=0.5,
     criterion_bce = nn.BCEWithLogitsLoss()  # Default reduction='mean'
     # No need for separate Dice criterion instance if using the function directly
 
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
+    optimizer = optim.AdamW(model.parameters(), lr=initial_lr, weight_decay=1e-2) # Use initial_lr
     scaler = torch.amp.GradScaler("cuda")
 
+    # --- Setup Linear Warmup + Cosine Decay Scheduler ---
+    if warmup_epochs >= num_epochs:
+        print(f"Warning: warmup_epochs ({warmup_epochs}) >= num_epochs ({num_epochs}). Using only LinearLR.")
+        # Only linear warmup if warmup covers all epochs
+        scheduler_warmup = lr_scheduler.LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=num_epochs)
+        scheduler = scheduler_warmup # Use only warmup scheduler
+    elif warmup_epochs > 0:
+        scheduler_warmup = lr_scheduler.LinearLR(optimizer, start_factor=0.01, total_iters=warmup_epochs)
+        scheduler_cosine = lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_decay_epochs, eta_min=min_lr,last_epoch=-1)
+        scheduler = lr_scheduler.SequentialLR(optimizer, schedulers=[scheduler_warmup, scheduler_cosine], milestones=[warmup_epochs])
+    else:
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=min_lr)
+    # --- End Scheduler Setup ---
+
     print(
-        f"Starting training on {device} for {num_epochs} epochs (BCE weight: {bce_weight}, Dice weight: {dice_weight})..."
+        f"Starting training on {device} for {num_epochs} epochs (BCE weight: {bce_weight}, Dice weight: {dice_weight}, Initial LR: {initial_lr})..."
     )
+    # Scheduler type is printed during setup above
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
@@ -84,7 +116,7 @@ def train_model(model, dataloader, num_epochs=10, device="cuda", bce_weight=0.5,
             # Modify dataset __getitem__ to return filename if needed for safer inference later
             # Assuming batch now contains: imgs, masks (and potentially filename)
             # Example: imgs, masks, _ = batch # If filename is returned
-            imgs, masks = batch  # Assuming original return format for now
+            imgs, masks, filenames = batch  # Assuming original return format for now
 
             imgs = imgs.to(device)
             # Ensure masks are FloatTensor for loss functions and scale to 0.0-1.0
@@ -121,7 +153,24 @@ def train_model(model, dataloader, num_epochs=10, device="cuda", bce_weight=0.5,
             # total_loss,loss_bce,loss_dixeのうちnanが出た場合は,ファイル名を出力
             if torch.isnan(total_loss) or torch.isnan(loss_bce) or torch.isnan(loss_dice):
                 print(f"NaN loss encountered in epoch {epoch + 1}.")
-                # Assuming filename is part of the batch
+                print(f"{filenames=}")
+                print(f"  Loss values: total={total_loss.item():.4f}, bce={loss_bce.item():.4f}, dice={loss_dice.item():.4f}")
+                # --- Debug Info ---
+                print("  --- Debugging Tensor Stats ---")
+                print(f"  Outputs (model predictions) stats:")
+                print(f"    Shape: {outputs.shape}")
+                print(f"    Contains NaN: {torch.isnan(outputs).any().item()}") # OutputsにNaNが含まれているのが原因
+                print(f"    Contains Inf: {torch.isinf(outputs).any().item()}")
+                if not torch.isnan(outputs).any() and not torch.isinf(outputs).any():
+                    print(f"    Min: {outputs.min().item():.4f}, Max: {outputs.max().item():.4f}, Mean: {outputs.mean().item():.4f}, Std: {outputs.std().item():.4f}")
+                print(f"  Masks (target) stats:")
+                print(f"    Shape: {masks.shape}")
+                print(f"    Contains NaN: {torch.isnan(masks).any().item()}")
+                print(f"    Contains Inf: {torch.isinf(masks).any().item()}")
+                if not torch.isnan(masks).any() and not torch.isinf(masks).any():
+                    print(f"    Min: {masks.min().item():.4f}, Max: {masks.max().item():.4f}, Mean: {masks.mean().item():.4f}, Std: {masks.std().item():.4f}")
+                print("  -----------------------------")
+                # Assuming filename is part of the batch - requires dataset modification
                 # print(f"Filename: {batch[2]}") # Uncomment if filename is returned in batch
                 continue
 
@@ -133,7 +182,11 @@ def train_model(model, dataloader, num_epochs=10, device="cuda", bce_weight=0.5,
         avg_loss = running_loss / len(dataloader)
         avg_bce_loss = running_bce_loss / len(dataloader)
         avg_dice_loss = running_dice_loss / len(dataloader)
-        print(f"Epoch {epoch + 1} Avg Loss: {avg_loss:.4f} (BCE: {avg_bce_loss:.4f}, Dice: {avg_dice_loss:.4f})")
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch + 1} Avg Loss: {avg_loss:.4f} (BCE: {avg_bce_loss:.4f}, Dice: {avg_dice_loss:.4f}) LR: {current_lr:.6f}")
+
+        # Step the scheduler after each epoch
+        scheduler.step()
 
     print("Training finished.")
 
@@ -142,7 +195,7 @@ if __name__ == "__main__":
     # --- Configuration ---
     ROOT_DIR = "/workspace/projects/solafune-field-area-segmentation"
     EX_NUM = "ex1"  # Example experiment number
-    IMAGE_DIR = os.path.join(ROOT_DIR, "data/train_images_mini")  # Path to training images (adjust if needed)
+    IMAGE_DIR = os.path.join(ROOT_DIR, "data/train_images")  # Path to training images (adjust if needed)
     ANNOTATION_FILE = os.path.join(
         ROOT_DIR, "data/train_annotation.json"
     )  # Path to training annotations (adjust if needed)
@@ -170,6 +223,9 @@ if __name__ == "__main__":
     # Loss weights
     BCE_WEIGHT = 0.5
     DICE_WEIGHT = 0.5
+    # LR Scheduler settings
+    LR_SCHEDULER_T_MAX = 50
+    LR_SCHEDULER_ETA_MIN = 1e-6
     # ---------------------
 
     print("Setting up dataset and dataloader...")
@@ -183,7 +239,7 @@ if __name__ == "__main__":
             # 512x512の領域をrandom_crop
             A.RandomCrop(height=CROP_H, width=CROP_W, p=1.0),
             # Resize to 1024x1024
-            A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST),
+            A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST,),
             # 16の倍数になるようにパディング（min_heightとmin_widthは16の倍数に切り上げ）
             # A.PadIfNeeded(
             #     min_height=16 * ((RESIZE_H + 15) // 16),
@@ -254,7 +310,14 @@ if __name__ == "__main__":
 
         # Start training
         train_model(
-            model, dataloader, num_epochs=NUM_EPOCHS, device=DEVICE, bce_weight=BCE_WEIGHT, dice_weight=DICE_WEIGHT
+            model,
+            dataloader,
+            num_epochs=NUM_EPOCHS,
+            device=DEVICE,
+            bce_weight=BCE_WEIGHT,
+            dice_weight=DICE_WEIGHT,
+            lr_scheduler_t_max=LR_SCHEDULER_T_MAX,
+            lr_scheduler_eta_min=LR_SCHEDULER_ETA_MIN,
         )
 
         # Save the model after training

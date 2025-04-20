@@ -168,7 +168,7 @@ if __name__ == "__main__":
         # --- Inference with Tiling ---
         print("\nStarting Tiling Inference...")
         model.eval()  # Set model to evaluation mode
-        thresholds = [0.4, 0.1, 0.1]  # Example thresholds for classes 0, 1, and 2
+        thresholds = [0.5, 0.1, 0.1]  # Example thresholds for classes 0, 1, and 2
 
         with torch.no_grad():
             # Iterate through each image in the dataset (batch_size=1)
@@ -180,7 +180,7 @@ if __name__ == "__main__":
                     print(f"Warning: Skipping empty batch at index {idx}")
                     continue
 
-                img_tensor, _ = batch  # Get the single image tensor (C, H, W)
+                img_tensor, _ , _ = batch  # Get the single image tensor (C, H, W)
                 img_tensor = img_tensor.squeeze(0)  # Remove batch dimension -> (C, H, W)
                 c, original_h, original_w = img_tensor.shape  # Get original dimensions *after* transform (Resize)
 

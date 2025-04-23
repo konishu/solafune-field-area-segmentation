@@ -94,10 +94,12 @@ class FieldSegmentationDataset(Dataset):
         edge_width=3,
         contact_width=3,
         transform=None,
+        img_idxes = None,
         mean=None,
         std=None,
     ):
         self.img_dir = img_dir
+        self.img_idxes = img_idxes
         self.scale_factor = scale_factor
         self.edge_width = edge_width
         self.contact_width = contact_width
@@ -144,7 +146,10 @@ class FieldSegmentationDataset(Dataset):
             # print(f"Warning: Skipping invalid image entry: {item}")
 
         try:
-            all_files = os.listdir(img_dir)
+            if img_idxes is None:
+                all_files = os.listdir(img_dir)
+            else:
+                all_files = [f'train_{idx}.tif' for idx in self.img_idxes]
         except FileNotFoundError:
             raise FileNotFoundError(f"Image directory not found: {img_dir}")
 

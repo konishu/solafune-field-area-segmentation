@@ -16,4 +16,4 @@ data/*
 outputs/models/*
 outputs/ex*
 src/nohup*
-
+src/wandb/*

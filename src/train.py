@@ -1,10 +1,14 @@
 import os
 import shutil
 import json # アノテーションファイル読み込みのため追加
+import numpy as np
+import torch
+import torchvision # For image logging
+import wandb # Import WANDB
+from dotenv import load_dotenv # Import dotenv
 
 import albumentations as A
 import cv2  # Import OpenCV
-import torch
 from albumentations.pytorch import ToTensorV2
 from models.unet_maxvit import UNet
 from torch import nn, optim
@@ -15,8 +19,6 @@ from tqdm import tqdm
 # Assuming FieldSegmentationDataset is defined in utils.dataset and UNet in models.unet_maxvit
 # Adjust imports based on your actual project structure if different
 from utils.dataset import FieldSegmentationDataset  # Corrected class name
-
-
 # --- Dice Loss 実装 ---
 def dice_coeff(pred, target, smooth=1.0, epsilon=1e-6):
     """Calculates Dice Coefficient per class."""
@@ -196,6 +198,17 @@ def train_model(
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Epoch {epoch + 1} Avg Train Loss: {avg_train_loss:.4f} (BCE: {avg_train_bce_loss:.4f}, Dice: {avg_train_dice_loss:.4f}) LR: {current_lr:.6f}")
 
+        # --- Log Training Metrics to WANDB ---
+        if wandb.run:
+            wandb.log({
+                "epoch": epoch + 1, # Log epoch number (1-based)
+                "avg_train_loss": avg_train_loss,
+                "avg_train_bce_loss": avg_train_bce_loss,
+                "avg_train_dice_loss": avg_train_dice_loss,
+                "learning_rate": current_lr,
+            }) # Logged against the epoch step implicitly by wandb
+        # --- End Log Training Metrics ---
+
         # Step the scheduler after each epoch
         scheduler.step()
 
@@ -205,6 +218,8 @@ def train_model(
             running_val_loss = 0.0
             running_val_bce_loss = 0.0
             running_val_dice_loss = 0.0
+            running_val_dice_coeff = 0.0 # Initialize Dice Coeff accumulator
+            num_val_samples = 0 # Initialize validation sample counter
             # Check if valid_dataloader is not None and has items before creating tqdm
             if valid_dataloader and len(valid_dataloader) > 0:
                 val_progress_bar = tqdm(valid_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs} [Valid]", leave=False)
@@ -240,13 +255,85 @@ def train_model(
                             val_progress_bar.set_postfix(loss=val_total_loss.item(), bce=val_loss_bce.item(), dice=val_loss_dice.item())
                         else:
                             print(f"Warning: NaN validation loss encountered in epoch {epoch + 1}.")
+                            continue # Skip dice calculation if loss is NaN
+
+                        # --- Calculate Dice Coefficient for the batch ---
+                        with torch.no_grad(): # Ensure no gradients are computed here
+                            # Apply sigmoid to outputs for dice calculation
+                            val_outputs_sigmoid = torch.sigmoid(val_outputs)
+                            # Calculate dice coefficient using the existing dice_coeff function
+                            # dice_coeff returns per-class dice: (N, C)
+                            dice_coeffs_batch = dice_coeff(val_outputs_sigmoid, val_masks, smooth=1.0, epsilon=1e-6) # Pass sigmoid output
+                            # Average over classes for each item in the batch -> (N,)
+                            dice_per_item = dice_coeffs_batch.mean(dim=1)
+                            # Sum the dice scores for the batch
+                            running_val_dice_coeff += dice_per_item.sum().item()
+                            num_val_samples += val_imgs.size(0) # Count samples processed
+                        # --- End Calculate Dice Coefficient ---
 
 
                 # Avoid division by zero
                 avg_val_loss = running_val_loss / len(valid_dataloader) if len(valid_dataloader) > 0 else 0
                 avg_val_bce_loss = running_val_bce_loss / len(valid_dataloader) if len(valid_dataloader) > 0 else 0
                 avg_val_dice_loss = running_val_dice_loss / len(valid_dataloader) if len(valid_dataloader) > 0 else 0
-                print(f"Epoch {epoch + 1} Avg Valid Loss: {avg_val_loss:.4f} (BCE: {avg_val_bce_loss:.4f}, Dice: {avg_val_dice_loss:.4f})")
+                avg_val_dice = running_val_dice_coeff / num_val_samples if num_val_samples > 0 else 0.0 # Calculate avg Dice Coeff
+                print(f"Epoch {epoch + 1} Avg Valid Loss: {avg_val_loss:.4f} (BCE: {avg_val_bce_loss:.4f}, Dice: {avg_val_dice_loss:.4f}) Dice Coeff: {avg_val_dice:.4f}") # Add Dice Coeff to print
+
+                # --- Log Validation Metrics and Images to WANDB ---
+                if wandb.run:
+                    log_dict = {
+                        "epoch": epoch + 1, # Log against epoch
+                        "avg_val_loss": avg_val_loss,
+                        "avg_val_bce_loss": avg_val_bce_loss,
+                        "avg_val_dice_loss": avg_val_dice_loss,
+                        "avg_val_dice_coeff": avg_val_dice,
+                    }
+
+                    # --- Log Validation Images ---
+                    log_images = []
+                    # Use the last batch's data (val_imgs, val_masks, val_outputs)
+                    if 'val_imgs' in locals() and val_imgs is not None: # Check if variables exist from the loop
+                        num_samples_to_log = min(4, val_imgs.size(0)) # Log up to 4 samples
+
+                        # Ensure tensors are on CPU and detached for processing
+                        val_imgs_cpu = val_imgs[:num_samples_to_log].cpu().detach()
+                        val_masks_cpu = val_masks[:num_samples_to_log].cpu().detach()
+                        val_outputs_cpu = val_outputs[:num_samples_to_log].cpu().detach()
+
+                        # Apply sigmoid and threshold for prediction mask visualization
+                        preds_sigmoid = torch.sigmoid(val_outputs_cpu)
+                        preds_binary = (preds_sigmoid > 0.5).float() # Threshold at 0.5
+
+                        for i in range(num_samples_to_log):
+                            # Input image: (C, H, W), assume C=3
+                            img = val_imgs_cpu[i]
+                            # Ground Truth Mask: (C, H, W), assume C=3 (field, edge, contact)
+                            mask_gt_combined = val_masks_cpu[i] # Already (3, H, W)
+                            # Prediction Mask: (C, H, W), same format
+                            mask_pred_combined = preds_binary[i] # Already (3, H, W)
+
+                            # Clamp values to avoid warnings if slightly outside [0,1]
+                            # img: (12, H, W) -> select channels 2,3,4 for visualization
+                            img = img[[2, 3, 4], ...]
+                            img = torch.clamp(img, 0, 1)
+                            mask_gt_combined = torch.clamp(mask_gt_combined, 0, 1)
+                            mask_pred_combined = torch.clamp(mask_pred_combined, 0, 1)
+
+                            # Create a grid: [Image | GT Mask | Pred Mask]
+                            combined_image = torchvision.utils.make_grid(
+                                [img, mask_gt_combined, mask_pred_combined],
+                                nrow=3, padding=2, normalize=False # Already in [0,1] range
+                            )
+                            log_images.append(wandb.Image(combined_image,
+                                            caption=f"Epoch {epoch+1} Sample {i} (Img | GT | Pred)"))
+
+                        if log_images: # Only add if images were generated
+                            log_dict["validation_samples"] = log_images
+                    # --- End Log Validation Images ---
+
+                    # Log all validation metrics and images for this epoch
+                    wandb.log(log_dict)
+                # --- End Log Validation Metrics and Images ---
             else:
                 print(f"Epoch {epoch + 1} Validation skipped (empty or no dataloader).")
 
@@ -257,6 +344,10 @@ def train_model(
 
 
 if __name__ == "__main__":
+    # --- Load Environment Variables ---
+    load_dotenv()
+    # --- End Load Environment Variables ---
+
     # --- Configuration ---
     ROOT_DIR = "/workspace/projects/solafune-field-area-segmentation"
     EX_NUM = "ex2"  # Example experiment number
@@ -270,7 +361,7 @@ if __name__ == "__main__":
     PRETRAINED = True
     BATCH_SIZE = 2  # Adjust based on GPU memory
     NUM_WORKERS = 4  # Adjust based on CPU cores
-    NUM_EPOCHS = 500  # Number of training epochs
+    NUM_EPOCHS = 1000  # Number of training epochs
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     INPUT_H = 512  # Example, not directly used if RandomCrop is applied
     INPUT_W = 512  # Example, not directly used if RandomCrop is applied
@@ -294,8 +385,37 @@ if __name__ == "__main__":
 
     # Validation settings
     VALID_IMG_INDEX = [0, 5, 10, 15, 20] # Indices of images to use for validation
-    VALIDATION_INTERVAL = 1 # Run validation every epoch
+    VALIDATION_INTERVAL = 25 # Run validation every epoch
     # ---------------------
+
+    # --- WANDB Config ---
+    wandb_config = {
+        "experiment_num": EX_NUM,
+        "backbone": BACKBONE,
+        "num_output_channels": NUM_OUTPUT_CHANNELS,
+        "pretrained": PRETRAINED,
+        "batch_size": BATCH_SIZE,
+        "num_epochs": NUM_EPOCHS,
+        "initial_lr": INITIAL_LR,
+        "warmup_epochs": WARMUP_EPOCHS,
+        "min_lr": MIN_LR,
+        "bce_weight": BCE_WEIGHT,
+        "dice_weight": DICE_WEIGHT,
+        "scale_factor": SCALE_FACTOR,
+        "crop_h": CROP_H,
+        "crop_w": CROP_W,
+        "resize_h": RESIZE_H,
+        "resize_w": RESIZE_W,
+        "validation_interval": VALIDATION_INTERVAL,
+        "dataset_mean": DATASET_MEAN, # Log mean/std if used
+        "dataset_std": DATASET_STD,
+        "optimizer": "AdamW", # Example: Log optimizer type
+        "weight_decay": 1e-2, # Example: Log weight decay from optimizer init
+        "valid_img_index": VALID_IMG_INDEX,
+        "device": DEVICE,
+    }
+    run_name = f"{EX_NUM}-{BACKBONE}"
+    # --- End WANDB Config ---
 
     print("Setting up datasets and dataloaders...")
 
@@ -334,6 +454,8 @@ if __name__ == "__main__":
     transform_valid = A.Compose(
         [
             # Note: RandomCrop is usually not applied to validation data
+            
+            A.CenterCrop(height=CROP_H, width=CROP_W, p=1.0), # Center crop for validation
             A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST),
             ToTensorV2(),
         ]
@@ -357,6 +479,14 @@ if __name__ == "__main__":
 
     # Ensure FieldSegmentationDataset is correctly implemented and paths/file are valid
     try:
+        # --- Initialize WANDB ---
+        wandb.init(
+            project="solafune-field-segmentation",
+            name=run_name,
+            config=wandb_config
+        )
+        # --- End Initialize WANDB ---
+
         # --- Create Datasets ---
         # Training Dataset
         # We need to pass the filenames directly to the dataset constructor.
@@ -381,7 +511,7 @@ if __name__ == "__main__":
             print("Initializing Validation Dataset...")
             valid_dataset = FieldSegmentationDataset(
                 img_dir=IMAGE_DIR,
-                ann_json_path=ANNOTATION_FILE, 
+                ann_json_path=ANNOTATION_FILE,
                 scale_factor=SCALE_FACTOR,
                 transform=transform_valid, # Use validation transforms
                 contact_width=5,
@@ -459,6 +589,7 @@ if __name__ == "__main__":
         torch.save(model.state_dict(), os.path.join(model_save_path, final_model_name))
         print(f"Model saved to {os.path.join(model_save_path, final_model_name)}")
 
+
     except NameError as e:
         print(f"Error: Class not found (FieldSegmentationDataset or UNet?). Details: {e}")
         print("Ensure 'src' is in PYTHONPATH or run from the project root. Cannot run training.")
@@ -468,3 +599,10 @@ if __name__ == "__main__":
         print(f"An unexpected error occurred during setup or training: {e}")
         import traceback
         traceback.print_exc() # Print full traceback for debugging
+    finally:
+        # --- Finish WANDB Run ---
+        if wandb.run: # Check if wandb.init was successful and run is active
+            print("Finishing WANDB run...")
+            wandb.finish()
+        # --- End Finish WANDB Run ---
+        print("Training script finished.") # Keep or adjust final message

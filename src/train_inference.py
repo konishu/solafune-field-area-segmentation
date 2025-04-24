@@ -44,11 +44,11 @@ except ImportError:
 if __name__ == "__main__":
     # --- Configuration (Should match the training configuration used to save the model) ---
     ROOT_DIR = "/workspace/projects/solafune-field-area-segmentation"
-    EX_NUM = "ex1"  # Example experiment number
+    EX_NUM = "ex2"  # Example experiment number
     IMAGE_DIR = os.path.join(ROOT_DIR, "data/inference_images")  # Path to training images used for inference
     ANNOTATION_FILE = os.path.join(ROOT_DIR, "data/train_annotation.json")  # Needed for dataset initialization
-    OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM, "check")  # Directory where the model is saved
-    MODEL_PATH = os.path.join(OUTPUT_DIR, "model.path")  # Path to the saved model state dict
+    OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM)  # Directory where the model is saved
+    MODEL_PATH = os.path.join(OUTPUT_DIR, "model_final.pth")  # Path to the saved model state dict
     PREDICTION_DIR = os.path.join(
         OUTPUT_DIR, "train_predictions_inference_script"
     )  # Output directory for predictions from this script

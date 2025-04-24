@@ -11,5 +11,9 @@ __pycache__
 unsloth_compiled_cache
 
 # project
+sandbox/*
 data/*
 outputs/models/*
+outputs/ex*
+src/nohup*
+src/wandb/*

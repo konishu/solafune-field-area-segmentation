@@ -350,12 +350,13 @@ if __name__ == "__main__":
 
     # --- Configuration ---
     ROOT_DIR = "/workspace/projects/solafune-field-area-segmentation"
-    EX_NUM = "ex2"  # Example experiment number
+    EX_NUM = "ex5"  # Example experiment number
     IMAGE_DIR = os.path.join(ROOT_DIR, "data/train_images")  # Path to training images (adjust if needed)
     ANNOTATION_FILE = os.path.join(
         ROOT_DIR, "data/train_annotation.json"
     )  # Path to training annotations (adjust if needed)
     OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM, "check")  # Path to save model outputs
+    CACHE_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM, "cache")  # Path to save cache files
     BACKBONE = "maxvit_small_tf_512.in1k"  # Example backbone
     NUM_OUTPUT_CHANNELS = 3  # Number of output channels (field, edge, contact)
     PRETRAINED = True
@@ -365,9 +366,9 @@ if __name__ == "__main__":
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     INPUT_H = 512  # Example, not directly used if RandomCrop is applied
     INPUT_W = 512  # Example, not directly used if RandomCrop is applied
-    SCALE_FACTOR = 3  # Resize scale factor for initial loading in dataset
-    CROP_H = 512  # Height after RandomCrop
-    CROP_W = 512  # Width after RandomCrop
+    SCALE_FACTOR = 2 # Resize scale factor for initial loading in dataset
+    CROP_H = 800  # Height after RandomCrop
+    CROP_W = 800  # Width after RandomCrop
     RESIZE_H = 1024  # Height after Resize transform (model input)
     RESIZE_W = 1024  # Width after Resize transform (model input)
     # Pre-calculated mean/std (Example values - REPLACE WITH YOUR ACTUAL VALUES)
@@ -443,10 +444,12 @@ if __name__ == "__main__":
     # Training transforms (with augmentation)
     transform_train = A.Compose(
         [
-            A.RandomCrop(height=CROP_H, width=CROP_W, p=1.0),
-            A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST),
+            A.ShiftScaleRotate(p=0.5, shift_limit=0.0625, scale_limit=0.1, rotate_limit=15),
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
+            A.RandomRotate90(p=0.5),
+            A.RandomCrop(height=CROP_H, width=CROP_W, p=1.0),
+            A.Resize(height=CROP_H, width=CROP_W, interpolation=cv2.INTER_NEAREST),
             ToTensorV2(),
         ]
     )
@@ -454,9 +457,7 @@ if __name__ == "__main__":
     transform_valid = A.Compose(
         [
             # Note: RandomCrop is usually not applied to validation data
-            
-            A.CenterCrop(height=CROP_H, width=CROP_W, p=1.0), # Center crop for validation
-            A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST),
+            A.CenterCrop(height=CROP_H, width=CROP_W, p=1.0),
             ToTensorV2(),
         ]
     )
@@ -474,7 +475,7 @@ if __name__ == "__main__":
     else:
         os.makedirs(debug_output_dir, exist_ok=True)
         print(f"Debug mask directory created: {debug_output_dir}")
-        
+
     print(f'train idx: {[i for i in range(50) if i not in VALID_IMG_INDEX]}')
 
     # Ensure FieldSegmentationDataset is correctly implemented and paths/file are valid
@@ -496,6 +497,7 @@ if __name__ == "__main__":
         train_dataset = FieldSegmentationDataset(
             img_dir=IMAGE_DIR,
             ann_json_path=ANNOTATION_FILE,
+            cache_dir=CACHE_DIR,
             scale_factor=SCALE_FACTOR,
             transform=transform_train, # Use training transforms
             contact_width=5,
@@ -512,6 +514,7 @@ if __name__ == "__main__":
             valid_dataset = FieldSegmentationDataset(
                 img_dir=IMAGE_DIR,
                 ann_json_path=ANNOTATION_FILE,
+                cache_dir=CACHE_DIR,
                 scale_factor=SCALE_FACTOR,
                 transform=transform_valid, # Use validation transforms
                 contact_width=5,
@@ -561,7 +564,7 @@ if __name__ == "__main__":
 
         print("Initializing model...")
         # Initialize model with the number of output channels (not classes for BCE loss)
-        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS)
+        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS, img_size=CROP_H)
         model.to(DEVICE)  # Move model to the specified device
         print(f"Model: UNet with {BACKBONE} backbone, {NUM_OUTPUT_CHANNELS} output channels.")
 

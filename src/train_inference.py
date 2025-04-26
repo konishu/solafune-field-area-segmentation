@@ -44,10 +44,11 @@ except ImportError:
 if __name__ == "__main__":
     # --- Configuration (Should match the training configuration used to save the model) ---
     ROOT_DIR = "/workspace/projects/solafune-field-area-segmentation"
-    EX_NUM = "ex2"  # Example experiment number
+    EX_NUM = "ex5"  # Example experiment number
     IMAGE_DIR = os.path.join(ROOT_DIR, "data/inference_images")  # Path to training images used for inference
     ANNOTATION_FILE = os.path.join(ROOT_DIR, "data/train_annotation.json")  # Needed for dataset initialization
     OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM)  # Directory where the model is saved
+    CACHE_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM, "cache")  # Path to save cache files
     MODEL_PATH = os.path.join(OUTPUT_DIR, "model_final.pth")  # Path to the saved model state dict
     PREDICTION_DIR = os.path.join(
         OUTPUT_DIR, "train_predictions_inference_script"
@@ -57,17 +58,17 @@ if __name__ == "__main__":
     PRETRAINED = False  # Pretrained weights are loaded from MODEL_PATH, not downloaded again
     NUM_WORKERS = 4  # Adjust based on CPU cores
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    SCALE_FACTOR = 3  # Must match dataset settings during training
-    CROP_H = 512  # Must match dataset settings during training
-    CROP_W = 512  # Must match dataset settings during training
-    RESIZE_H = 1024  # Must match model input size during training
-    RESIZE_W = 1024  # Must match model input size during training
+    SCALE_FACTOR = 2  # Must match dataset settings during training
+    CROP_H = 800  # Must match dataset settings during training
+    CROP_W = 800  # Must match dataset settings during training
+    RESIZE_H = 800  # Must match model input size during training
+    RESIZE_W = 800  # Must match model input size during training
     DATASET_MEAN = None  # Use the same mean/std as during training
     DATASET_STD = None  # Use the same mean/std as during training
-    TILE_H = 512  # Tile size for inference (should match CROP_H ideally)
-    TILE_W = 512  # Tile size for inference (should match CROP_W ideally)
-    STRIDE_H = 256  # Stride for vertical tiling
-    STRIDE_W = 256  # Stride for horizontal tiling
+    TILE_H = 800  # Tile size for inference (should match CROP_H ideally)
+    TILE_W = 800  # Tile size for inference (should match CROP_W ideally)
+    STRIDE_H = 200  # Stride for vertical tiling
+    STRIDE_W = 200  # Stride for horizontal tiling
     # ---------------------
 
     print("Setting up dataset for inference...")
@@ -100,6 +101,7 @@ if __name__ == "__main__":
             edge_width=3,  # Match training settings
             mean=DATASET_MEAN,
             std=DATASET_STD,
+            cache_dir=CACHE_DIR,
         )
 
         if len(dataset) == 0:
@@ -114,7 +116,7 @@ if __name__ == "__main__":
 
         print("Initializing and loading model...")
         # Initialize model structure
-        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS)
+        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS,img_size=800)
 
         # Load the saved state dictionary
         if not os.path.exists(MODEL_PATH):
@@ -168,7 +170,7 @@ if __name__ == "__main__":
         # --- Inference with Tiling ---
         print("\nStarting Tiling Inference...")
         model.eval()  # Set model to evaluation mode
-        thresholds = [0.5, 0.1, 0.1]  # Example thresholds for classes 0, 1, and 2
+        thresholds = [0.3, 0.1, 0.1]  # Example thresholds for classes 0, 1, and 2
 
         with torch.no_grad():
             # Iterate through each image in the dataset (batch_size=1)

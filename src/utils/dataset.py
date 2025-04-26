@@ -20,9 +20,6 @@ from torch.utils.data import Dataset
 
 # from skimage.measure import label as skimage_label # Not used in this implementation
 
-# キャッシュファイルのディレクトリ
-CACHE_DIR = "/workspace/projects/solafune-field-area-segmentation/data/cache"
-
 def fill_nan_pixels(img):
     """Fill NaN pixels with the mean of their valid neighbors."""
     for c in range(img.shape[0]):  # 各チャネルについて
@@ -89,6 +86,7 @@ class FieldSegmentationDataset(Dataset):
     def __init__(
         self,
         img_dir,
+        cache_dir,
         ann_json_path,
         scale_factor=1.0,
         edge_width=3,
@@ -99,6 +97,7 @@ class FieldSegmentationDataset(Dataset):
         std=None,
     ):
         self.img_dir = img_dir
+        self.cache_dir = cache_dir
         self.img_idxes = img_idxes
         self.scale_factor = scale_factor
         self.edge_width = edge_width
@@ -157,6 +156,12 @@ class FieldSegmentationDataset(Dataset):
         print(f"Found {len(self.img_filenames)} images in {img_dir} with annotations.")
         if not self.img_filenames:
             print(f"Warning: No matching .tif files found in {img_dir} listed in {ann_json_path}")
+        
+        if os.path.exists(self.cache_dir):
+            print(f"Cache directory exists: {self.cache_dir}")
+        else:
+            os.makedirs(self.cache_dir, exist_ok=True)
+        
         # --- (End of Initialization code) ---
 
     def __len__(self):
@@ -168,7 +173,7 @@ class FieldSegmentationDataset(Dataset):
 
         img_filename = self.img_filenames[idx]
         img_path = os.path.join(self.img_dir, img_filename)
-        cache_path = os.path.join(CACHE_DIR, img_filename.replace(".tif", ".npz"))
+        cache_path = os.path.join(self.cache_dir, img_filename.replace(".tif", ".npz"))
         try:
             # print(f"Loading from cache: {cache_path}")
             loaded = np.load(cache_path)
@@ -381,7 +386,6 @@ class FieldSegmentationDataset(Dataset):
             )  # Save combined mask as PNG (0-255)
 
             # --- Save to cache ---
-            os.makedirs(CACHE_DIR, exist_ok=True)  # Create cache directory if it doesn't exist
             np.savez_compressed(cache_path, img=img, mask=mask)
 
         # --- Resize masks if image was resized (using updated img_shape) ---

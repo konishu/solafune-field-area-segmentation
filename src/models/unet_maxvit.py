@@ -5,11 +5,11 @@ from torch import nn
 
 
 class UNet(nn.Module):
-    def __init__(self, backbone_name="maxvit_small_tf_512.in1k", pretrained=True, num_classes=3, input_channels=12):
+    def __init__(self, backbone_name="maxvit_small_tf_512.in1k", pretrained=True, num_classes=3, input_channels=12,img_size=1024):
         super().__init__()
         # エンコーダ（特徴マップ抽出）
         self.encoder = timm.create_model(
-            backbone_name, pretrained=pretrained, features_only=True, in_chans=input_channels
+            backbone_name, pretrained=pretrained, features_only=True, in_chans=input_channels, img_size=img_size
         )
 
         # 各エンコーダ出力のチャンネル数

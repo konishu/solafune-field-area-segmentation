@@ -41,6 +41,15 @@ def fill_nan_pixels(img):
                     img[c, y, x] = 0
     return img
 
+def normalize_band(band):
+    mean = np.mean(band)
+    std = np.std(band)
+    # プラスマイナス３σの範囲内に値を収める
+    band = np.clip(band, mean - 3 * std, mean + 3 * std)
+    # 0-1の範囲で正規化
+    band = (band - band.min()) / (band.max() - band.min())
+    return band
+
 # Helper function to convert COCO segmentation format to mask
 def segmentation_to_mask(segmentation, shape, scale_factor=1.0):
     """Converts polygon segmentation [x1, y1, x2, y2,...] to a binary mask, applying scaling."""
@@ -229,16 +238,16 @@ class FieldSegmentationDataset(Dataset):
             # target_w = int(original_width * self.scale_factor)
             # img_shape = (target_h, target_w)
             # print(f"Using original image shape: C={img.shape[0]}, H={img_shape[0]}, W={img_shape[1]}")
-
             # --- Normalize image ---
             if self.mean is not None and self.std is not None:
                 if self.mean.shape[0] != num_channels or self.std.shape[0] != num_channels:
                     raise ValueError(f"Mean/std channel mismatch for {img_filename}")
                 img = (img - self.mean) / (self.std + 1e-6)
             else:
-                img_mean = img.mean(axis=(1, 2), keepdims=True)
-                img_std = img.std(axis=(1, 2), keepdims=True)
-                img = (img - img_mean) / (img_std + 1e-6)
+                # Normalize each band independently
+                for c in range(num_channels):
+                    img[c] = normalize_band(img[c])
+                    # img[c] = (img[c] - np.mean(img[c])) / (np.std(img[c]) + 1e-6)  # Optional: per-channel normalization
 
             # --- Mask Generation ---
             img_annotations = self.annotations.get(img_filename, [])

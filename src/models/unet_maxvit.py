@@ -8,9 +8,15 @@ class UNet(nn.Module):
     def __init__(self, backbone_name="maxvit_small_tf_512.in1k", pretrained=True, num_classes=3, input_channels=12,img_size=1024):
         super().__init__()
         # エンコーダ（特徴マップ抽出）
-        self.encoder = timm.create_model(
-            backbone_name, pretrained=pretrained, features_only=True, in_chans=input_channels, img_size=img_size
-        )
+        # TODO:img_sizeが適用できなかったので分離してるが、修正したい
+        if backbone_name == "tf_efficientnetv2_m.in21k_ft_in1k":
+            self.encoder = timm.create_model(
+                backbone_name, pretrained=pretrained, features_only=True, in_chans=input_channels
+            )
+        else:
+            self.encoder = timm.create_model(
+                backbone_name, pretrained=pretrained, features_only=True, in_chans=input_channels, img_size=img_size
+            )
 
         # 各エンコーダ出力のチャンネル数
         channels = [f["num_chs"] for f in self.encoder.feature_info]  # 例: [64, 96, 192, 384, 768]

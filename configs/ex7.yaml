@@ -1,0 +1,55 @@
+# Experiment Configuration
+experiment:
+  root_dir: "/workspace/projects/solafune-field-area-segmentation" # プロジェクトルートディレクトリ
+  ex_num: "ex7" # 実験番号 (ファイル名から取得することも可能)
+  output_dir_base: "outputs" # 出力ディレクトリのベース
+  cache_dir_base: "outputs" # キャッシュディレクトリのベース
+
+# Data Configuration
+data:
+  image_dir: "data/train_images" # 画像ディレクトリ
+  annotation_file: "data/train_annotation.json" # アノテーションファイル
+  valid_img_index: [0, 5, 10, 15, 20] # 検証用画像のインデックス
+  num_workers: 4 # データローダーのワーカー数
+  # Dataset specific params
+  scale_factor: 2 # データセット読み込み時のスケールファクター
+  contact_width: 5 # 接触領域の幅 (ピクセル)
+  edge_width: 3 # エッジ領域の幅 (ピクセル)
+  dataset_mean: null # データセットの平均値 (nullの場合、画像ごとに正規化)
+  dataset_std: null  # データセットの標準偏差 (nullの場合、画像ごとに正規化)
+
+# Model Configuration
+model:
+  backbone: "tf_efficientnetv2_m.in21k_ft_in1k" # バックボーンモデル名
+  num_output_channels: 3 # 出力チャネル数 (field, edge, contact)
+  pretrained: true # 事前学習済みモデルを使用するかどうか
+
+# Training Configuration
+training:
+  batch_size: 2 # バッチサイズ
+  num_epochs: 1000 # エポック数
+  device: "cuda" # 使用デバイス ('cuda' or 'cpu') スクリプト内で利用可能かチェック
+  # Transforms
+  crop_h: 1504 # ランダムクロップ後の高さ
+  crop_w: 1504 # ランダムクロップ後の幅
+  resize_h: 1024 # モデル入力の高さ
+  resize_w: 1024 # モデル入力の幅
+  # Loss weights
+  bce_weight: 0.5 # BCE損失の重み
+  dice_weight: 0.5 # Dice損失の重み
+  # LR Scheduler
+  initial_lr: 4.0e-4 # 初期学習率
+  warmup_epochs: 10 # ウォームアップエポック数
+  min_lr: 1.0e-6 # 最小学習率
+  # Optimizer (AdamW specific)
+  weight_decay: 0.01 # 重み減衰 (AdamW)
+  # Validation
+  validation_interval: 25 # 検証を実行する間隔 (エポック)
+
+# WANDB Configuration (Optional)
+wandb:
+  project: "solafune-field-segmentation" # WandBプロジェクト名
+  # run_name はスクリプト内で f"{ex_num}-{backbone}" のように生成されます
+  log_images: true # 検証画像をログに記録するかどうか
+  log_image_freq: 25 # 画像をログに記録する頻度 (デフォルトは検証間隔と一致)
+  num_images_to_log: 4 # ログに記録する画像の数

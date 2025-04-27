@@ -9,7 +9,7 @@ experiment:
 data:
   image_dir: "data/train_images" # 画像ディレクトリ
   annotation_file: "data/train_annotation.json" # アノテーションファイル
-  valid_img_index: [0, 5, 10, 15, 20] # 検証用画像のインデックス
+  valid_img_index: [0] # 検証用画像のインデックス  valid_img_index: [0, 5, 10, 15, 20] # 検証用画像のインデックス
   num_workers: 4 # データローダーのワーカー数
   # Dataset specific params
   scale_factor: 2 # データセット読み込み時のスケールファクター
@@ -27,7 +27,7 @@ model:
 # Training Configuration
 training:
   batch_size: 2 # バッチサイズ
-  num_epochs: 1000 # エポック数
+  num_epochs: 10 # エポック数
   device: "cuda" # 使用デバイス ('cuda' or 'cpu') スクリプト内で利用可能かチェック
   # Transforms
   crop_h: 1504 # ランダムクロップ後の高さ
@@ -44,9 +44,10 @@ training:
   # Optimizer (AdamW specific)
   weight_decay: 0.01 # 重み減衰 (AdamW)
   # Validation
-  validation_interval: 25 # 検証を実行する間隔 (エポック)
+  validation_interval: 5 # 検証を実行する間隔 (エポック)
 
 validation:
+  image_dir: "data/train_images_mini" # 検証用画像ディレクトリ
   batch_size: 1 # 検証時のバッチサイズ
   num_workers: 4 # 検証データローダーのワーカー数
   # Transforms

@@ -51,7 +51,7 @@ CACHE_DIR_BASE = cfg['experiment']['cache_dir_base']
 # Construct full paths relative to ROOT_DIR
 OUTPUT_DIR = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM) # Keep check subdir for debug outputs if needed
 CACHE_DIR = os.path.join(ROOT_DIR, CACHE_DIR_BASE, EX_NUM, "cache")
-IMAGE_DIR = os.path.join(ROOT_DIR, cfg['data']['image_dir'])
+IMAGE_DIR = os.path.join(ROOT_DIR, cfg['validation']['image_dir'])
 ANNOTATION_FILE = os.path.join(ROOT_DIR, cfg['data']['annotation_file'])
 MODEL_PATH = os.path.join(OUTPUT_DIR, 'model_final.pth') # Use saved model name from config
 PREDICTION_DIR = os.path.join(

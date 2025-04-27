@@ -357,7 +357,7 @@ if __name__ == "__main__":
     OUTPUT_DIR_BASE = cfg['experiment']['output_dir_base']
     CACHE_DIR_BASE = cfg['experiment']['cache_dir_base']
     # Construct full paths relative to ROOT_DIR
-    OUTPUT_DIR = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM, "check") # Keep check subdir for debug outputs if needed
+    OUTPUT_DIR = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM) # Keep check subdir for debug outputs if needed
     CACHE_DIR = os.path.join(ROOT_DIR, CACHE_DIR_BASE, EX_NUM, "cache")
     IMAGE_DIR = os.path.join(ROOT_DIR, cfg['data']['image_dir'])
     ANNOTATION_FILE = os.path.join(ROOT_DIR, cfg['data']['annotation_file'])
@@ -457,18 +457,6 @@ if __name__ == "__main__":
     )
 
     print(f"Images will be cropped to {CROP_H}x{CROP_W} then resized to {RESIZE_H}x{RESIZE_W} for model input.")
-
-    # Save masks for debugging (Consider making this optional or controlled by cfg)
-    debug_output_dir = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM, "check_debug_masks")
-    if os.path.exists(debug_output_dir):
-        try:
-            shutil.rmtree(debug_output_dir, ignore_errors=True)
-            os.makedirs(debug_output_dir, exist_ok=True)
-        except Exception as e:
-            print(f"Error removing existing debug directory: {e}")
-    else:
-        os.makedirs(debug_output_dir, exist_ok=True)
-        print(f"Debug mask directory created: {debug_output_dir}")
 
     # Use actual number of images for index calculation
     train_idxes = [i for i in range(len(all_img_filenames)) if i not in VALID_IMG_INDEX]

@@ -389,10 +389,10 @@ class FieldSegmentationDataset(Dataset):
             # 3クラスのマスクを作成 (0: 背景, 1: field, 2: contact, 3: edge)し、red, blue, greenにして保存
             mask_ = np.stack([field_mask, contact_mask, edge_mask], axis=0).astype(np.uint8)  # (3, H, W)
             # Save the combined mask as PNG (0-255)
-            cv2.imwrite(
-                f"/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/combined_{img_path.split('/')[-1].replace('.tif', '')}.png",
-                mask_.transpose((1, 2, 0)) * 255,
-            )  # Save combined mask as PNG (0-255)
+            # cv2.imwrite(
+            #     f"/workspace/projects/solafune-field-area-segmentation/outputs/ex0/check/combined_{img_path.split('/')[-1].replace('.tif', '')}.png",
+            #     mask_.transpose((1, 2, 0)) * 255,
+            # )  # Save combined mask as PNG (0-255)
 
             # --- Save to cache ---
             np.savez_compressed(cache_path, img=img, mask=mask)

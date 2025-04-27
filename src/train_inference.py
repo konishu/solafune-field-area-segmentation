@@ -44,7 +44,7 @@ except ImportError:
 if __name__ == "__main__":
     # --- Configuration (Should match the training configuration used to save the model) ---
     ROOT_DIR = "/workspace/projects/solafune-field-area-segmentation"
-    EX_NUM = "ex5"  # Example experiment number
+    EX_NUM = "ex6"  # Example experiment number
     IMAGE_DIR = os.path.join(ROOT_DIR, "data/inference_images")  # Path to training images used for inference
     ANNOTATION_FILE = os.path.join(ROOT_DIR, "data/train_annotation.json")  # Needed for dataset initialization
     OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM)  # Directory where the model is saved
@@ -53,22 +53,22 @@ if __name__ == "__main__":
     PREDICTION_DIR = os.path.join(
         OUTPUT_DIR, "train_predictions_inference_script"
     )  # Output directory for predictions from this script
-    BACKBONE = "maxvit_small_tf_512.in1k"  # Must match the trained model's backbone
+    BACKBONE = "tf_efficientnetv2_m.in21k_ft_in1k"  # Example backbone
     NUM_OUTPUT_CHANNELS = 3  # Must match the trained model's output channels
-    PRETRAINED = False  # Pretrained weights are loaded from MODEL_PATH, not downloaded again
+    PRETRAINED = True  # Pretrained weights are loaded from MODEL_PATH, not downloaded again
     NUM_WORKERS = 4  # Adjust based on CPU cores
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     SCALE_FACTOR = 2  # Must match dataset settings during training
-    CROP_H = 800  # Must match dataset settings during training
-    CROP_W = 800  # Must match dataset settings during training
-    RESIZE_H = 800  # Must match model input size during training
-    RESIZE_W = 800  # Must match model input size during training
+    CROP_H = 1504  # Must match dataset settings during training
+    CROP_W = 1504  # Must match dataset settings during training
+    RESIZE_H = 1504  # Must match model input size during training
+    RESIZE_W = 1504  # Must match model input size during training
     DATASET_MEAN = None  # Use the same mean/std as during training
     DATASET_STD = None  # Use the same mean/std as during training
-    TILE_H = 800  # Tile size for inference (should match CROP_H ideally)
-    TILE_W = 800  # Tile size for inference (should match CROP_W ideally)
-    STRIDE_H = 200  # Stride for vertical tiling
-    STRIDE_W = 200  # Stride for horizontal tiling
+    TILE_H = 1504  # Tile size for inference (should match CROP_H ideally)
+    TILE_W = 1504  # Tile size for inference (should match CROP_W ideally)
+    STRIDE_H = 386  # Stride for vertical tiling
+    STRIDE_W = 386  # Stride for horizontal tiling
     # ---------------------
 
     print("Setting up dataset for inference...")

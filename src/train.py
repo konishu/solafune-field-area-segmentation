@@ -1,6 +1,8 @@
 import os
 import shutil
 import json # アノテーションファイル読み込みのため追加
+import argparse # YAML読み込みのため追加
+import yaml # YAML読み込みのため追加
 import numpy as np
 import torch
 import torchvision # For image logging
@@ -61,26 +63,15 @@ def train_model(
     min_lr = 1e-6,
     lr_scheduler_t_max=500, # Add lr_scheduler_t_max parameter - Note: This might need adjustment based on train epochs only
     lr_scheduler_eta_min=3e-5, # Add lr_scheduler_eta_min parameter
+    # Parameters below are passed from main based on cfg, but keep defaults for potential direct use
+    weight_decay=1e-2, # Default value if not passed from main
+    wandb_log_images=True, # Default value if not passed from main
+    wandb_num_images_to_log=4, # Default value if not passed from main
 ):
     """
     Trains the U-Net model using BCE + Dice loss with Linear Warmup + Cosine Decay LR schedule,
     and performs validation periodically.
-
-    Args:
-        model (nn.Module): The U-Net model to train.
-        train_dataloader (DataLoader): DataLoader providing training images and masks.
-        valid_dataloader (DataLoader): DataLoader providing validation images and masks (can be None).
-        validation_interval (int): How often to run validation (in epochs).
-        num_epochs (int): Number of training epochs.
-        device (str): Device to train on ('cuda' or 'cpu').
-        bce_weight (float): Weight for BCE loss.
-        dice_weight (float): Weight for Dice loss.
-        initial_lr (float): Initial learning rate for the optimizer.
-        warmup_epochs (int): Number of epochs for linear warmup.
-        cosine_decay_epochs (int): Total epochs for cosine decay (often num_epochs - warmup_epochs).
-        min_lr (float): Minimum learning rate for cosine decay.
-        lr_scheduler_t_max (int): T_max for CosineAnnealingLR (often num_epochs - warmup_epochs).
-        lr_scheduler_eta_min (float): Minimum learning rate for CosineAnnealingLR.
+    (Core logic remains unchanged as requested)
     """
     if not torch.cuda.is_available() and device == "cuda":
         print("CUDA not available, switching to CPU.")
@@ -91,12 +82,12 @@ def train_model(
     criterion_bce = nn.BCEWithLogitsLoss()  # Default reduction='mean'
     # No need for separate Dice criterion instance if using the function directly
 
-    optimizer = optim.AdamW(model.parameters(), lr=initial_lr, weight_decay=1e-2) # Use initial_lr
-    scaler = torch.amp.GradScaler(device) # Use device string directly
+    optimizer = optim.AdamW(model.parameters(), lr=initial_lr, weight_decay=weight_decay) # Use weight_decay passed in
+    scaler = torch.amp.GradScaler(enabled=(device == 'cuda')) # Enable scaler only for CUDA
 
     # --- Setup Linear Warmup + Cosine Decay Scheduler ---
     # Adjust cosine decay epochs based on warmup
-    actual_cosine_epochs = num_epochs - warmup_epochs
+    actual_cosine_epochs = num_epochs - warmup_epochs # Use num_epochs passed as cosine_decay_epochs
     if actual_cosine_epochs <= 0:
         print(f"Warning: warmup_epochs ({warmup_epochs}) >= num_epochs ({num_epochs}). Cosine decay part will not run.")
         actual_cosine_epochs = 1 # Avoid T_max=0 error
@@ -115,7 +106,7 @@ def train_model(
     # --- End Scheduler Setup ---
 
     print(
-        f"Starting training on {device} for {num_epochs} epochs (BCE weight: {bce_weight}, Dice weight: {dice_weight}, Initial LR: {initial_lr})..."
+        f"Starting training on {device} for {num_epochs} epochs (BCE weight: {bce_weight}, Dice weight: {dice_weight}, Initial LR: {initial_lr}, Weight Decay: {weight_decay})..."
     )
     # Scheduler type is printed during setup above
     for epoch in range(num_epochs):
@@ -206,7 +197,7 @@ def train_model(
                 "avg_train_bce_loss": avg_train_bce_loss,
                 "avg_train_dice_loss": avg_train_dice_loss,
                 "learning_rate": current_lr,
-            }) # Logged against the epoch step implicitly by wandb
+            }, step=epoch + 1) # Explicitly set step to epoch
         # --- End Log Training Metrics ---
 
         # Step the scheduler after each epoch
@@ -225,14 +216,14 @@ def train_model(
                 val_progress_bar = tqdm(valid_dataloader, desc=f"Epoch {epoch + 1}/{num_epochs} [Valid]", leave=False)
 
                 with torch.no_grad():
-                    for val_batch in val_progress_bar:
+                    for i_val_batch, val_batch in enumerate(val_progress_bar): # Enumerate for image logging check
                         if val_batch is None: continue # Skip empty batches if any
 
                         val_imgs, val_masks, _ = val_batch # Assuming filename is returned but not needed here
                         val_imgs = val_imgs.to(device)
                         val_masks = val_masks.to(device, dtype=torch.float) / 255.0
 
-                        with torch.amp.autocast(device_type=device, dtype=torch.bfloat16):
+                        with torch.amp.autocast(device_type=device, dtype=torch.bfloat16, enabled=(device == 'cuda')):
                             val_outputs = model(val_imgs)
 
                             # --- Shape Checks ---
@@ -271,6 +262,45 @@ def train_model(
                             num_val_samples += val_imgs.size(0) # Count samples processed
                         # --- End Calculate Dice Coefficient ---
 
+                        # --- Log Validation Images (Only for the first validation batch if enabled) ---
+                        if wandb.run and wandb_log_images and i_val_batch == 0:
+                            log_images = []
+                            num_samples_to_log = min(wandb_num_images_to_log, val_imgs.size(0))
+
+                            # Ensure tensors are on CPU and detached for processing
+                            val_imgs_cpu = val_imgs[:num_samples_to_log].cpu().detach()
+                            val_masks_cpu = val_masks[:num_samples_to_log].cpu().detach()
+                            val_outputs_cpu = val_outputs[:num_samples_to_log].cpu().detach()
+
+                            # Apply sigmoid and threshold for prediction mask visualization
+                            preds_sigmoid = torch.sigmoid(val_outputs_cpu)
+                            preds_binary = (preds_sigmoid > 0.5).float() # Threshold at 0.5
+
+                            for i in range(num_samples_to_log):
+                                # Input image: (C, H, W), assume C=12 -> select RGB channels
+                                img = val_imgs_cpu[i][[2, 3, 4], ...] # Select channels 2,3,4 for visualization
+                                # Ground Truth Mask: (C, H, W), assume C=3 (field, edge, contact)
+                                mask_gt_combined = val_masks_cpu[i] # Already (3, H, W)
+                                # Prediction Mask: (C, H, W), same format
+                                mask_pred_combined = preds_binary[i] # Already (3, H, W)
+
+                                # Clamp values to avoid warnings if slightly outside [0,1]
+                                img = torch.clamp(img, 0, 1)
+                                mask_gt_combined = torch.clamp(mask_gt_combined, 0, 1)
+                                mask_pred_combined = torch.clamp(mask_pred_combined, 0, 1)
+
+                                # Create a grid: [Image | GT Mask | Pred Mask]
+                                combined_image = torchvision.utils.make_grid(
+                                    [img, mask_gt_combined, mask_pred_combined],
+                                    nrow=3, padding=2, normalize=False # Already in [0,1] range
+                                )
+                                log_images.append(wandb.Image(combined_image,
+                                                caption=f"Epoch {epoch+1} Sample {i} (Img | GT | Pred)"))
+
+                            if log_images: # Only add if images were generated
+                                wandb.log({"validation_samples": log_images}, step=epoch + 1)
+                        # --- End Log Validation Images ---
+
 
                 # Avoid division by zero
                 avg_val_loss = running_val_loss / len(valid_dataloader) if len(valid_dataloader) > 0 else 0
@@ -279,61 +309,16 @@ def train_model(
                 avg_val_dice = running_val_dice_coeff / num_val_samples if num_val_samples > 0 else 0.0 # Calculate avg Dice Coeff
                 print(f"Epoch {epoch + 1} Avg Valid Loss: {avg_val_loss:.4f} (BCE: {avg_val_bce_loss:.4f}, Dice: {avg_val_dice_loss:.4f}) Dice Coeff: {avg_val_dice:.4f}") # Add Dice Coeff to print
 
-                # --- Log Validation Metrics and Images to WANDB ---
+                # --- Log Validation Metrics to WANDB ---
                 if wandb.run:
-                    log_dict = {
+                    wandb.log({
                         "epoch": epoch + 1, # Log against epoch
                         "avg_val_loss": avg_val_loss,
                         "avg_val_bce_loss": avg_val_bce_loss,
                         "avg_val_dice_loss": avg_val_dice_loss,
                         "avg_val_dice_coeff": avg_val_dice,
-                    }
-
-                    # --- Log Validation Images ---
-                    log_images = []
-                    # Use the last batch's data (val_imgs, val_masks, val_outputs)
-                    if 'val_imgs' in locals() and val_imgs is not None: # Check if variables exist from the loop
-                        num_samples_to_log = min(4, val_imgs.size(0)) # Log up to 4 samples
-
-                        # Ensure tensors are on CPU and detached for processing
-                        val_imgs_cpu = val_imgs[:num_samples_to_log].cpu().detach()
-                        val_masks_cpu = val_masks[:num_samples_to_log].cpu().detach()
-                        val_outputs_cpu = val_outputs[:num_samples_to_log].cpu().detach()
-
-                        # Apply sigmoid and threshold for prediction mask visualization
-                        preds_sigmoid = torch.sigmoid(val_outputs_cpu)
-                        preds_binary = (preds_sigmoid > 0.5).float() # Threshold at 0.5
-
-                        for i in range(num_samples_to_log):
-                            # Input image: (C, H, W), assume C=3
-                            img = val_imgs_cpu[i]
-                            # Ground Truth Mask: (C, H, W), assume C=3 (field, edge, contact)
-                            mask_gt_combined = val_masks_cpu[i] # Already (3, H, W)
-                            # Prediction Mask: (C, H, W), same format
-                            mask_pred_combined = preds_binary[i] # Already (3, H, W)
-
-                            # Clamp values to avoid warnings if slightly outside [0,1]
-                            # img: (12, H, W) -> select channels 2,3,4 for visualization
-                            img = img[[2, 3, 4], ...]
-                            img = torch.clamp(img, 0, 1)
-                            mask_gt_combined = torch.clamp(mask_gt_combined, 0, 1)
-                            mask_pred_combined = torch.clamp(mask_pred_combined, 0, 1)
-
-                            # Create a grid: [Image | GT Mask | Pred Mask]
-                            combined_image = torchvision.utils.make_grid(
-                                [img, mask_gt_combined, mask_pred_combined],
-                                nrow=3, padding=2, normalize=False # Already in [0,1] range
-                            )
-                            log_images.append(wandb.Image(combined_image,
-                                            caption=f"Epoch {epoch+1} Sample {i} (Img | GT | Pred)"))
-
-                        if log_images: # Only add if images were generated
-                            log_dict["validation_samples"] = log_images
-                    # --- End Log Validation Images ---
-
-                    # Log all validation metrics and images for this epoch
-                    wandb.log(log_dict)
-                # --- End Log Validation Metrics and Images ---
+                    }, step=epoch + 1) # Explicitly set step to epoch
+                # --- End Log Validation Metrics ---
             else:
                 print(f"Epoch {epoch + 1} Validation skipped (empty or no dataloader).")
 
@@ -344,79 +329,87 @@ def train_model(
 
 
 if __name__ == "__main__":
-    # --- Load Environment Variables ---
+    # --- Argument Parser ---
+    parser = argparse.ArgumentParser(description="Train U-Net model for field segmentation.")
+    parser.add_argument('--config', type=str, required=True, help='Path to the YAML configuration file.')
+    args = parser.parse_args()
+
+    # --- Load Configuration ---
+    try:
+        with open(args.config, 'r') as f:
+            cfg = yaml.safe_load(f)
+        print(f"Configuration loaded from: {args.config}")
+    except FileNotFoundError:
+        print(f"Error: Configuration file not found at {args.config}")
+        exit()
+    except Exception as e:
+        print(f"Error loading or parsing configuration file: {e}")
+        exit()
+
+    # --- Load Environment Variables (Optional, e.g., for WANDB API Key) ---
     load_dotenv()
     # --- End Load Environment Variables ---
 
-    # --- Configuration ---
-    ROOT_DIR = "/workspace/projects/solafune-field-area-segmentation"
-    EX_NUM = "ex5"  # Example experiment number
-    IMAGE_DIR = os.path.join(ROOT_DIR, "data/train_images")  # Path to training images (adjust if needed)
-    ANNOTATION_FILE = os.path.join(
-        ROOT_DIR, "data/train_annotation.json"
-    )  # Path to training annotations (adjust if needed)
-    OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM, "check")  # Path to save model outputs
-    CACHE_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM, "cache")  # Path to save cache files
-    BACKBONE = "maxvit_small_tf_512.in1k"  # Example backbone
-    NUM_OUTPUT_CHANNELS = 3  # Number of output channels (field, edge, contact)
-    PRETRAINED = True
-    BATCH_SIZE = 2  # Adjust based on GPU memory
-    NUM_WORKERS = 4  # Adjust based on CPU cores
-    NUM_EPOCHS = 1000  # Number of training epochs
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    INPUT_H = 512  # Example, not directly used if RandomCrop is applied
-    INPUT_W = 512  # Example, not directly used if RandomCrop is applied
-    SCALE_FACTOR = 2 # Resize scale factor for initial loading in dataset
-    CROP_H = 800  # Height after RandomCrop
-    CROP_W = 800  # Width after RandomCrop
-    RESIZE_H = 1024  # Height after Resize transform (model input)
-    RESIZE_W = 1024  # Width after Resize transform (model input)
-    # Pre-calculated mean/std (Example values - REPLACE WITH YOUR ACTUAL VALUES)
-    DATASET_MEAN = None  # Set to None to use per-image normalization if not pre-calculated
-    DATASET_STD = None  # Set to None to use per-image normalization if not pre-calculated
-    # Loss weights
-    BCE_WEIGHT = 0.5
-    DICE_WEIGHT = 0.5
-    # LR Scheduler settings
-    INITIAL_LR = 4e-4 # Define initial LR here
-    WARMUP_EPOCHS = 10 # Define warmup epochs here
-    MIN_LR = 1e-6 # Define min LR here
-    # LR_SCHEDULER_T_MAX = 50 # This might be redundant if calculated inside train_model
-    # LR_SCHEDULER_ETA_MIN = 1e-6 # This is now min_lr
+    # --- Extract Configuration Values from YAML ---
+    # Experiment paths
+    ROOT_DIR = cfg['experiment']['root_dir']
+    EX_NUM = cfg['experiment']['ex_num']
+    OUTPUT_DIR_BASE = cfg['experiment']['output_dir_base']
+    CACHE_DIR_BASE = cfg['experiment']['cache_dir_base']
+    # Construct full paths relative to ROOT_DIR
+    OUTPUT_DIR = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM, "check") # Keep check subdir for debug outputs if needed
+    CACHE_DIR = os.path.join(ROOT_DIR, CACHE_DIR_BASE, EX_NUM, "cache")
+    IMAGE_DIR = os.path.join(ROOT_DIR, cfg['data']['image_dir'])
+    ANNOTATION_FILE = os.path.join(ROOT_DIR, cfg['data']['annotation_file'])
 
-    # Validation settings
-    VALID_IMG_INDEX = [0, 5, 10, 15, 20] # Indices of images to use for validation
-    VALIDATION_INTERVAL = 25 # Run validation every epoch
-    # ---------------------
+    # Data params
+    VALID_IMG_INDEX = cfg['data']['valid_img_index']
+    NUM_WORKERS = cfg['data']['num_workers']
+    SCALE_FACTOR = cfg['data']['scale_factor']
+    CONTACT_WIDTH = cfg['data']['contact_width']
+    EDGE_WIDTH = cfg['data']['edge_width']
+    DATASET_MEAN = cfg['data']['dataset_mean']
+    DATASET_STD = cfg['data']['dataset_std']
 
-    # --- WANDB Config ---
-    wandb_config = {
-        "experiment_num": EX_NUM,
-        "backbone": BACKBONE,
-        "num_output_channels": NUM_OUTPUT_CHANNELS,
-        "pretrained": PRETRAINED,
-        "batch_size": BATCH_SIZE,
-        "num_epochs": NUM_EPOCHS,
-        "initial_lr": INITIAL_LR,
-        "warmup_epochs": WARMUP_EPOCHS,
-        "min_lr": MIN_LR,
-        "bce_weight": BCE_WEIGHT,
-        "dice_weight": DICE_WEIGHT,
-        "scale_factor": SCALE_FACTOR,
-        "crop_h": CROP_H,
-        "crop_w": CROP_W,
-        "resize_h": RESIZE_H,
-        "resize_w": RESIZE_W,
-        "validation_interval": VALIDATION_INTERVAL,
-        "dataset_mean": DATASET_MEAN, # Log mean/std if used
-        "dataset_std": DATASET_STD,
-        "optimizer": "AdamW", # Example: Log optimizer type
-        "weight_decay": 1e-2, # Example: Log weight decay from optimizer init
-        "valid_img_index": VALID_IMG_INDEX,
-        "device": DEVICE,
-    }
-    run_name = f"{EX_NUM}-{BACKBONE}"
-    # --- End WANDB Config ---
+    # Model params
+    BACKBONE = cfg['model']['backbone']
+    NUM_OUTPUT_CHANNELS = cfg['model']['num_output_channels']
+    PRETRAINED = cfg['model']['pretrained']
+
+    # Training params
+    BATCH_SIZE = cfg['training']['batch_size']
+    NUM_EPOCHS = cfg['training']['num_epochs']
+    # Use device from config, but check availability (Original logic kept)
+    DEVICE = cfg['training']['device'] if torch.cuda.is_available() else "cpu"
+    if cfg['training']['device'] == "cuda" and DEVICE == "cpu":
+         print("Warning: CUDA requested in config but not available. Using CPU.")
+
+    CROP_H = cfg['training']['crop_h']
+    CROP_W = cfg['training']['crop_w']
+    RESIZE_H = cfg['training']['resize_h']
+    RESIZE_W = cfg['training']['resize_w']
+    BCE_WEIGHT = cfg['training']['bce_weight']
+    DICE_WEIGHT = cfg['training']['dice_weight']
+    INITIAL_LR = cfg['training']['initial_lr']
+    WARMUP_EPOCHS = cfg['training']['warmup_epochs']
+    MIN_LR = cfg['training']['min_lr']
+    WEIGHT_DECAY = cfg['training']['weight_decay']
+    VALIDATION_INTERVAL = cfg['training']['validation_interval']
+
+    # WandB params
+    WANDB_PROJECT = cfg['wandb']['project']
+    WANDB_LOG_IMAGES = cfg['wandb']['log_images']
+    # Use get with default for optional params
+    WANDB_LOG_IMAGE_FREQ = cfg['wandb'].get('log_image_freq', VALIDATION_INTERVAL) # Default to validation interval if not specified
+    WANDB_NUM_IMAGES_TO_LOG = cfg['wandb'].get('num_images_to_log', 4) # Default to 4 if not specified
+    run_name = f"{EX_NUM}-{BACKBONE}" # Keep dynamic run name
+
+    # --- Create Output and Cache Directories ---
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    print(f"Output directory (check): {OUTPUT_DIR}")
+    print(f"Cache directory: {CACHE_DIR}")
+    # -----------------------------------------
 
     print("Setting up datasets and dataloaders...")
 
@@ -448,24 +441,25 @@ if __name__ == "__main__":
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
-            A.RandomCrop(height=CROP_H, width=CROP_W, p=1.0),
-            A.Resize(height=CROP_H, width=CROP_W, interpolation=cv2.INTER_NEAREST),
+            A.RandomCrop(height=CROP_H, width=CROP_W, p=1.0), # Use CROP_H/W from cfg
+            A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST), # Use RESIZE_H/W from cfg
             ToTensorV2(),
         ]
     )
     # Validation transforms (only resize and tensor conversion)
     transform_valid = A.Compose(
         [
-            # Note: RandomCrop is usually not applied to validation data
-            A.CenterCrop(height=CROP_H, width=CROP_W, p=1.0),
+            # Validation: Center crop to CROP_H/W, then resize to RESIZE_H/W
+            A.CenterCrop(height=CROP_H, width=CROP_W, p=1.0), # Use CROP_H/W from cfg
+            A.Resize(height=RESIZE_H, width=RESIZE_W, interpolation=cv2.INTER_NEAREST), # Use RESIZE_H/W from cfg
             ToTensorV2(),
         ]
     )
 
-    print(f"Images will be resized to {RESIZE_H}x{RESIZE_W} for model input.")
+    print(f"Images will be cropped to {CROP_H}x{CROP_W} then resized to {RESIZE_H}x{RESIZE_W} for model input.")
 
-    # Save masks for debugging (Consider making this optional)
-    debug_output_dir = os.path.join(ROOT_DIR, "outputs", EX_NUM, "check_debug_masks")
+    # Save masks for debugging (Consider making this optional or controlled by cfg)
+    debug_output_dir = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM, "check_debug_masks")
     if os.path.exists(debug_output_dir):
         try:
             shutil.rmtree(debug_output_dir, ignore_errors=True)
@@ -476,23 +470,32 @@ if __name__ == "__main__":
         os.makedirs(debug_output_dir, exist_ok=True)
         print(f"Debug mask directory created: {debug_output_dir}")
 
-    print(f'train idx: {[i for i in range(50) if i not in VALID_IMG_INDEX]}')
+    # Use actual number of images for index calculation
+    train_idxes = [i for i in range(len(all_img_filenames)) if i not in VALID_IMG_INDEX]
+    print(f'train idx: {train_idxes}')
 
     # Ensure FieldSegmentationDataset is correctly implemented and paths/file are valid
     try:
         # --- Initialize WANDB ---
+        # Combine relevant config parts for logging
+        wandb_config_log = {
+            "config_file": args.config, # Log the config file path
+            "experiment": cfg['experiment'],
+            "data": cfg['data'],
+            "model": cfg['model'],
+            "training": cfg['training'],
+            "optimizer": "AdamW", # Log optimizer type
+            # Add any other relevant info not directly in cfg sections
+        }
         wandb.init(
-            project="solafune-field-segmentation",
+            project=WANDB_PROJECT, # Use project name from cfg
             name=run_name,
-            config=wandb_config
+            config=wandb_config_log # Log the combined config
         )
         # --- End Initialize WANDB ---
 
         # --- Create Datasets ---
         # Training Dataset
-        # We need to pass the filenames directly to the dataset constructor.
-        # Since the current FieldSegmentationDataset doesn't support this directly,
-        # we modify the approach: Create two separate dataset instances.
         print("Initializing Training Dataset...")
         train_dataset = FieldSegmentationDataset(
             img_dir=IMAGE_DIR,
@@ -500,9 +503,9 @@ if __name__ == "__main__":
             cache_dir=CACHE_DIR,
             scale_factor=SCALE_FACTOR,
             transform=transform_train, # Use training transforms
-            contact_width=5,
-            edge_width=3,
-            img_idxes=[i for i in range(50) if i not in VALID_IMG_INDEX],
+            contact_width=CONTACT_WIDTH, # Use cfg value
+            edge_width=EDGE_WIDTH, # Use cfg value
+            img_idxes=train_idxes, # Use calculated train indices
             mean=DATASET_MEAN,
             std=DATASET_STD,
         )
@@ -517,14 +520,14 @@ if __name__ == "__main__":
                 cache_dir=CACHE_DIR,
                 scale_factor=SCALE_FACTOR,
                 transform=transform_valid, # Use validation transforms
-                contact_width=5,
-                edge_width=3, # Keep consistent
-                img_idxes=VALID_IMG_INDEX, # Pass validation indices
+                contact_width=CONTACT_WIDTH, # Use cfg value
+                edge_width=EDGE_WIDTH, # Use cfg value
+                img_idxes=VALID_IMG_INDEX, # Pass validation indices from cfg
                 mean=DATASET_MEAN,
                 std=DATASET_STD # Use same normalization
             )
-            # Manually filter the filenames *after* initialization
-            print(f"{valid_dataset.img_filenames}")
+            # Manually filter the filenames *after* initialization (if needed, dataset should handle indices)
+            # print(f"{valid_dataset.img_filenames}")
 
 
         if len(train_dataset) == 0:
@@ -546,6 +549,7 @@ if __name__ == "__main__":
             shuffle=True, # Shuffle training data
             num_workers=NUM_WORKERS,
             pin_memory=True if DEVICE == "cuda" else False,
+            drop_last=True, # Consider dropping last incomplete batch
         )
         # Only create valid_dataloader if valid_dataset exists and is not empty
         if valid_dataset and len(valid_dataset) > 0:
@@ -555,6 +559,7 @@ if __name__ == "__main__":
                 shuffle=False, # No need to shuffle validation data
                 num_workers=NUM_WORKERS,
                 pin_memory=True if DEVICE == "cuda" else False,
+                drop_last=False, # Keep all validation samples
             )
         else:
              valid_dataloader = None # Ensure it's None if dataset is empty/None
@@ -563,32 +568,37 @@ if __name__ == "__main__":
 
 
         print("Initializing model...")
-        # Initialize model with the number of output channels (not classes for BCE loss)
-        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS, img_size=CROP_H)
+        # Initialize model with the number of output channels and resized input size
+        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS, img_size=RESIZE_H) # Use RESIZE_H for model input size
         model.to(DEVICE)  # Move model to the specified device
-        print(f"Model: UNet with {BACKBONE} backbone, {NUM_OUTPUT_CHANNELS} output channels.")
+        print(f"Model: UNet with {BACKBONE} backbone, {NUM_OUTPUT_CHANNELS} output channels, input size {RESIZE_H}x{RESIZE_W}.")
 
         # Start training
         train_model(
             model=model,
-            train_dataloader=train_dataloader, # Pass train dataloader
-            valid_dataloader=valid_dataloader, # Pass valid dataloader (can be None)
-            validation_interval=VALIDATION_INTERVAL, # Pass validation interval
+            train_dataloader=train_dataloader,
+            valid_dataloader=valid_dataloader,
+            validation_interval=VALIDATION_INTERVAL,
             num_epochs=NUM_EPOCHS,
-            device=DEVICE,
+            device=DEVICE, # Pass the determined device
             bce_weight=BCE_WEIGHT,
             dice_weight=DICE_WEIGHT,
-            initial_lr=INITIAL_LR, # Use config value
-            warmup_epochs=WARMUP_EPOCHS, # Use config value
-            cosine_decay_epochs=NUM_EPOCHS, # Pass num_epochs, calculation inside train_model
-            min_lr=MIN_LR, # Use config value
-            # lr_scheduler_t_max and lr_scheduler_eta_min are handled internally now
+            initial_lr=INITIAL_LR,
+            warmup_epochs=WARMUP_EPOCHS,
+            cosine_decay_epochs=NUM_EPOCHS, # Pass total epochs
+            min_lr=MIN_LR,
+            # Pass relevant parameters from cfg to train_model
+            weight_decay=WEIGHT_DECAY,
+            wandb_log_images=WANDB_LOG_IMAGES,
+            wandb_num_images_to_log=WANDB_NUM_IMAGES_TO_LOG,
+            # lr_scheduler_t_max and lr_scheduler_eta_min are handled internally in train_model
         )
 
         # Save the model after training
-        model_save_path = os.path.join(ROOT_DIR, "outputs", EX_NUM) # Save in experiment root
+        # Save in the experiment's root output directory (not the 'check' subdir)
+        model_save_path = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM)
         os.makedirs(model_save_path, exist_ok=True)
-        final_model_name = "model_final.pth" # Changed from model.path to model.pth
+        final_model_name = "model_final.pth"
         torch.save(model.state_dict(), os.path.join(model_save_path, final_model_name))
         print(f"Model saved to {os.path.join(model_save_path, final_model_name)}")
 

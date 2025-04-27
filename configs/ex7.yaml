@@ -46,6 +46,20 @@ training:
   # Validation
   validation_interval: 25 # 検証を実行する間隔 (エポック)
 
+validation:
+  batch_size: 1 # 検証時のバッチサイズ
+  num_workers: 4 # 検証データローダーのワーカー数
+  # Transforms
+  resize_h: 1024 # モデル入力の高さ (検証時)
+  resize_w: 1024 # モデル入力の幅 (検証時)
+  # Evaluation metrics
+  iou_threshold: 0.5 # IoU閾値
+
+  tile_h: 1504
+  tile_w: 1504 # タイルの高さと幅 (検証時)
+  stride_h: 386 # ストライドの高さ (検証時)
+  stride_w: 386 # ストライドの幅 (検証時)
+
 # WANDB Configuration (Optional)
 wandb:
   project: "solafune-field-segmentation" # WandBプロジェクト名

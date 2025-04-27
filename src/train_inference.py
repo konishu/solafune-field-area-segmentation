@@ -1,3 +1,6 @@
+import argparse
+import os
+import shutil
 import math
 import os
 import sys
@@ -9,68 +12,76 @@ import torch
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import yaml
 
-# Assuming FieldSegmentationDataset is defined in utils.dataset and UNet in models.unet_maxvit
-# Adjust imports based on your actual project structure if different
-try:
-    from models.unet_maxvit import UNet
-    from utils.dataset import FieldSegmentationDataset  # Corrected class name
-except ImportError:
-    print(
-        "Warning: Could not import CustomDataset or UNet. Ensure they are defined in the correct paths (src/utils/dataset.py and src/models/unet_maxvit.py)"
-    )
+from models.unet_maxvit import UNet
+from utils.dataset import FieldSegmentationDataset  # Corrected class name
 
-    # Define dummy classes if imports fail, to allow the script to load
-    class FieldSegmentationDataset:  # Corrected dummy class name
-        def __init__(self, *args, **kwargs):
-            pass
 
-        def __len__(self):
-            return 0
+# --- Helper Functions (Assuming these are defined elsewhere or copied from train.py/utils) ---
+def load_config(config_path):
+    """Loads configuration from a YAML file."""
+    try:
+        with open(config_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+        return cfg
+    except FileNotFoundError:
+        print(f"Error: Configuration file not found at {config_path}")
+        exit()
+    except Exception as e:
+        print(f"Error loading configuration file: {e}")
+        exit()
 
-        def __getitem__(self, idx):
-            # Return dummy tensors (C, H, W)
-            return torch.zeros(3, 64, 64), torch.zeros(1, 64, 64)
+# --- Argument Parser ---
+parser = argparse.ArgumentParser(description="Inference script for field segmentation")
+parser.add_argument('--config', type=str, default='../configs/ex7.yaml', # Default config path
+                    help='Path to the configuration YAML file')
+args = parser.parse_args()
 
-    class UNet(torch.nn.Module):
-        def __init__(self, *args, **kwargs):
-            super().__init__()
-            self.dummy = torch.nn.Linear(1, 1)
+# --- Load Configuration ---
+cfg = load_config(args.config)
+print("Configuration loaded:")
 
-        def forward(self, x):
-            return self.dummy(torch.zeros(x.shape[0], 1))
+
+# --- Configuration (Derived from loaded cfg) ---
+ROOT_DIR = cfg['experiment']['root_dir']
+EX_NUM = cfg['experiment']['ex_num']
+OUTPUT_DIR_BASE = cfg['experiment']['output_dir_base']
+CACHE_DIR_BASE = cfg['experiment']['cache_dir_base']
+# Construct full paths relative to ROOT_DIR
+OUTPUT_DIR = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM) # Keep check subdir for debug outputs if needed
+CACHE_DIR = os.path.join(ROOT_DIR, CACHE_DIR_BASE, EX_NUM, "cache")
+IMAGE_DIR = os.path.join(ROOT_DIR, cfg['validation']['image_dir'])
+ANNOTATION_FILE = os.path.join(ROOT_DIR, cfg['data']['annotation_file'])
+MODEL_PATH = os.path.join(OUTPUT_DIR, 'model_final.pth') # Use saved model name from config
+PREDICTION_DIR = os.path.join(
+    OUTPUT_DIR, "train_predictions_inference_script" # Keep the specific output folder name for now
+)
+BACKBONE = cfg['model']['backbone']
+NUM_OUTPUT_CHANNELS = cfg['model']['num_output_channels']
+PRETRAINED = False # Set to False for inference as we load weights from MODEL_PATH
+NUM_WORKERS = cfg['validation']['num_workers']
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Dataset/Preprocessing parameters should match training
+SCALE_FACTOR = cfg['data']['scale_factor']
+CONTACT_WIDTH = cfg['data']['contact_width']
+EDGE_WIDTH = cfg['data']['edge_width']
+# CROP_H/W might correspond to the size used during validation transforms if different from resize
+CROP_H = cfg['training']['crop_h'] # Assuming validation used cropping
+CROP_W = cfg['training']['crop_w']
+# RESIZE_H/W is the actual model input size
+RESIZE_H = cfg['training']['resize_h']
+RESIZE_W = cfg['training']['resize_w']
+DATASET_MEAN = cfg['data'].get('mean', None) # Use get for optional keys
+DATASET_STD = cfg['data'].get('std', None)
+TILE_H = cfg['validation'].get('tile_h', 512) # Use crop size if tile size not specified
+TILE_W = cfg['validation'].get('tile_w', 512) # Use crop size if tile size not specified
+STRIDE_H = cfg['validation'].get('stride_h', 256) # Default stride
+STRIDE_W = cfg['validation'].get('stride_w', 256) # Default stride
+
 
 
 if __name__ == "__main__":
-    # --- Configuration (Should match the training configuration used to save the model) ---
-    ROOT_DIR = "/workspace/projects/solafune-field-area-segmentation"
-    EX_NUM = "ex5"  # Example experiment number
-    IMAGE_DIR = os.path.join(ROOT_DIR, "data/inference_images")  # Path to training images used for inference
-    ANNOTATION_FILE = os.path.join(ROOT_DIR, "data/train_annotation.json")  # Needed for dataset initialization
-    OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM)  # Directory where the model is saved
-    CACHE_DIR = os.path.join(ROOT_DIR, "outputs", EX_NUM, "cache")  # Path to save cache files
-    MODEL_PATH = os.path.join(OUTPUT_DIR, "model_final.pth")  # Path to the saved model state dict
-    PREDICTION_DIR = os.path.join(
-        OUTPUT_DIR, "train_predictions_inference_script"
-    )  # Output directory for predictions from this script
-    BACKBONE = "maxvit_small_tf_512.in1k"  # Must match the trained model's backbone
-    NUM_OUTPUT_CHANNELS = 3  # Must match the trained model's output channels
-    PRETRAINED = False  # Pretrained weights are loaded from MODEL_PATH, not downloaded again
-    NUM_WORKERS = 4  # Adjust based on CPU cores
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    SCALE_FACTOR = 2  # Must match dataset settings during training
-    CROP_H = 800  # Must match dataset settings during training
-    CROP_W = 800  # Must match dataset settings during training
-    RESIZE_H = 800  # Must match model input size during training
-    RESIZE_W = 800  # Must match model input size during training
-    DATASET_MEAN = None  # Use the same mean/std as during training
-    DATASET_STD = None  # Use the same mean/std as during training
-    TILE_H = 800  # Tile size for inference (should match CROP_H ideally)
-    TILE_W = 800  # Tile size for inference (should match CROP_W ideally)
-    STRIDE_H = 200  # Stride for vertical tiling
-    STRIDE_W = 200  # Stride for horizontal tiling
-    # ---------------------
-
     print("Setting up dataset for inference...")
     # Define transformations (should be consistent with training, but without random augmentations if desired)
     # Using the same transform as training for simplicity here, but RandomCrop might not be ideal for inference
@@ -97,8 +108,8 @@ if __name__ == "__main__":
             ann_json_path=ANNOTATION_FILE,
             scale_factor=SCALE_FACTOR,
             transform=transform,
-            contact_width=5,  # Match training settings
-            edge_width=3,  # Match training settings
+            contact_width=CONTACT_WIDTH,  # Match training settings
+            edge_width=EDGE_WIDTH,  # Match training settings
             mean=DATASET_MEAN,
             std=DATASET_STD,
             cache_dir=CACHE_DIR,
@@ -116,7 +127,7 @@ if __name__ == "__main__":
 
         print("Initializing and loading model...")
         # Initialize model structure
-        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS,img_size=800)
+        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS,img_size=RESIZE_W)
 
         # Load the saved state dictionary
         if not os.path.exists(MODEL_PATH):

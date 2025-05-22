@@ -17,7 +17,7 @@ data:
   edge_width: 3 # エッジ領域の幅 (ピクセル)
   dataset_mean: null # データセットの平均値 (nullの場合、画像ごとに正規化)
   dataset_std: null  # データセットの標準偏差 (nullの場合、画像ごとに正規化)
-  pos_weight_ratio: [1.0, 1.2, 2.] # 正例の重み比率 (field, edge, contact)
+  pos_weight_ratio: [1.0, 1.0, 1.] # 正例の重み比率 (field, edge, contact)
 
 # Model Configuration
 model:
@@ -28,7 +28,7 @@ model:
 # Training Configuration
 training:
   batch_size: 2 # バッチサイズ
-  num_epochs: 1000 # エポック数
+  num_epochs: 100 # エポック数
   accumulation_steps: 3 # 勾配累積ステップ数
   device: "cuda" # 使用デバイス ('cuda' or 'cpu') スクリプト内で利用可能かチェック
   # Transforms
@@ -41,12 +41,12 @@ training:
   dice_weight: 0.5 # Dice損失の重み
   # LR Scheduler
   initial_lr: 3.0e-4 # 初期学習率
-  warmup_epochs: 10 # ウォームアップエポック数
+  warmup_epochs: 25 # ウォームアップエポック数
   min_lr: 1.0e-6 # 最小学習率
   # Optimizer (AdamW specific)
   weight_decay: 0.01 # 重み減衰 (AdamW)
   # Validation
-  validation_interval: 10 # 検証を実行する間隔 (エポック)
+  validation_interval: 25 # 検証を実行する間隔 (エポック)
 
 validation:
   image_dir: "data/train_images_mini" # 検証用画像ディレクトリ
@@ -68,5 +68,5 @@ wandb:
   project: "solafune-field-segmentation" # WandBプロジェクト名
   # run_name はスクリプト内で f"{ex_num}-{backbone}" のように生成されます
   log_images: true # 検証画像をログに記録するかどうか
-  log_image_freq: 10 # 画像をログに記録する頻度 (デフォルトは検証間隔と一致)
+  log_image_freq: 25 # 画像をログに記録する頻度 (デフォルトは検証間隔と一致)
   num_images_to_log: 4 # ログに記録する画像の数

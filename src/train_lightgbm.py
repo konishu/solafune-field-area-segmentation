@@ -31,7 +31,7 @@ ANNOTATION_FILE = "/workspace/projects/solafune-field-area-segmentation/data/tra
 CACHE_DIR = "/workspace/projects/solafune-field-area-segmentation/sandbox/outputs/cache"
 SCALE_FACTOR = 1
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-OUTPUT_PRED_DIR = "/workspace/projects/solafune-field-area-segmentation/outputs/ex8_with_aug" # 出力先変更
+OUTPUT_PRED_DIR = "/workspace/projects/solafune-field-area-segmentation/outputs/ex8_with_aug"  # 出力先変更
 N_SPLITS = 4
 RANDOM_STATE = 136
 transform = None
@@ -44,7 +44,7 @@ trains = glob.glob(f"{train_path}/*")
 trains.sort()
 
 if __name__ == "__main__":
-    train_idxes = list(range(0, 45))
+    train_idxes = list(range(0, 40))
 
     print("--- Preparing Training Data ---")
     train_dataset = FieldSegmentationDataset(
@@ -64,7 +64,7 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=4, # 問題発生時は 0 を試す
+        num_workers=4,  # 問題発生時は 0 を試す
         pin_memory=True if DEVICE == "cuda" else False,
         drop_last=False,
     )
@@ -72,7 +72,7 @@ if __name__ == "__main__":
     X = []
     y = []
     g = []
-    aug_type = [] # ★ Augmentationの種類を記録するリストを追加 (0: original, 1: flip_v, 2: flip_h)
+    aug_type = []  # ★ Augmentationの種類を記録するリストを追加 (0: original, 1: flip_v, 2: flip_h)
     img_meta = {}
 
     print("--- Extracting Features and Labels (With Augmentation) ---")
@@ -84,7 +84,7 @@ if __name__ == "__main__":
         mask_np = mask_tensor.squeeze(0).permute(1, 2, 0).numpy()
 
         H, W, _ = img_np.shape
-        img_meta[i] = {'shape': (H, W), 'filename': file_name_str}
+        img_meta[i] = {"shape": (H, W), "filename": file_name_str}
 
         # --- 特徴量エンジニアリング (変更なし) ---
         NDVI = (img_np[:, :, 7] - img_np[:, :, 3]) / (img_np[:, :, 7] + img_np[:, :, 3] + 1e-8)
@@ -99,23 +99,23 @@ if __name__ == "__main__":
         X.append(img_features.reshape(-1, len(band_for_train_index)))
         y.append(mask_target.reshape(-1))
         g.append(np.full((num_pixels,), i))
-        aug_type.append(np.zeros((num_pixels,), dtype=np.uint8)) # ★ aug_type: 0 (original)
+        aug_type.append(np.zeros((num_pixels,), dtype=np.uint8))  # ★ aug_type: 0 (original)
 
-        # 2. 上下反転
-        img_flipped_v = cv2.flip(img_features, 0)
-        mask_flipped_v = cv2.flip(mask_target, 0)
-        X.append(img_flipped_v.reshape(-1, len(band_for_train_index)))
-        y.append(mask_flipped_v.reshape(-1))
-        g.append(np.full((num_pixels,), i))
-        aug_type.append(np.ones((num_pixels,), dtype=np.uint8)) # ★ aug_type: 1 (flip_v)
+        # # 2. 上下反転
+        # img_flipped_v = cv2.flip(img_features, 0)
+        # mask_flipped_v = cv2.flip(mask_target, 0)
+        # X.append(img_flipped_v.reshape(-1, len(band_for_train_index)))
+        # y.append(mask_flipped_v.reshape(-1))
+        # g.append(np.full((num_pixels,), i))
+        # aug_type.append(np.ones((num_pixels,), dtype=np.uint8))  # ★ aug_type: 1 (flip_v)
 
-        # 3. 左右反転
-        img_flipped_h = cv2.flip(img_features, 1)
-        mask_flipped_h = cv2.flip(mask_target, 1)
-        X.append(img_flipped_h.reshape(-1, len(band_for_train_index)))
-        y.append(mask_flipped_h.reshape(-1))
-        g.append(np.full((num_pixels,), i))
-        aug_type.append(np.full((num_pixels,), 2, dtype=np.uint8)) # ★ aug_type: 2 (flip_h)
+        # # 3. 左右反転
+        # img_flipped_h = cv2.flip(img_features, 1)
+        # mask_flipped_h = cv2.flip(mask_target, 1)
+        # X.append(img_flipped_h.reshape(-1, len(band_for_train_index)))
+        # y.append(mask_flipped_h.reshape(-1))
+        # g.append(np.full((num_pixels,), i))
+        # aug_type.append(np.full((num_pixels,), 2, dtype=np.uint8))  # ★ aug_type: 2 (flip_h)
 
     if not X:
         raise ValueError("No data loaded.")
@@ -123,7 +123,7 @@ if __name__ == "__main__":
     X = np.vstack(X)
     y = np.hstack(y)
     g = np.hstack(g)
-    aug_type = np.hstack(aug_type) # ★ aug_type も hstack する
+    aug_type = np.hstack(aug_type)  # ★ aug_type も hstack する
 
     print(f"Final Data shapes: X={X.shape}, y={y.shape}, g={g.shape}, aug_type={aug_type.shape}")
     print(f"Number of unique groups: {len(np.unique(g))}")
@@ -139,24 +139,24 @@ if __name__ == "__main__":
         "objective": "binary",
         "metric": "binary_logloss",
         "boosting_type": "gbdt",
-        "num_leaves": 128, # メモリ考慮
-        "max_depth": -1,
+        "num_leaves": 256,  # メモリ考慮
+        "max_depth": 32,
         "learning_rate": 0.05,
-        "n_estimators": 1000,
+        "n_estimators": 2000,
         "random_state": RANDOM_STATE,
-        "n_jobs": -1, # 全コア使用に変更
+        "n_jobs": 4,  # 全コア使用に変更
         "colsample_bytree": 0.8,
         "subsample": 0.8,
-        "verbose": -1,
+        "verbose": 50,
     }
 
     # --- KFold ループ ---
     for i, (train_idx, valid_idx) in enumerate(gkfold.split(X, y, groups=g)):
-        print(f"\n--- Fold {i+1}/{N_SPLITS} ---")
+        print(f"\n--- Fold {i + 1}/{N_SPLITS} ---")
         train_x, train_y = X[train_idx], y[train_idx]
         val_x, val_y = X[valid_idx], y[valid_idx]
         val_g = g[valid_idx]
-        val_aug_type = aug_type[valid_idx] # ★ バリデーションデータの Augmentation タイプを取得
+        val_aug_type = aug_type[valid_idx]  # ★ バリデーションデータの Augmentation タイプを取得
 
         # グループリークチェック (変更なし)
         train_groups = np.unique(g[train_idx])
@@ -167,13 +167,13 @@ if __name__ == "__main__":
 
         # モデル学習 (変更なし)
         m = lgb.LGBMClassifier(**lgb_params)
-        print(f"Training model Fold {i+1}...")
+        print(f"Training model Fold {i + 1}...")
         m.fit(
             train_x,
             train_y,
             eval_set=[(val_x, val_y)],
             eval_metric="logloss",
-            callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=100)],
+            callbacks=[lgb.early_stopping(stopping_rounds=100, verbose=100)],
         )
         models.append(m)
 
@@ -202,7 +202,7 @@ if __name__ == "__main__":
                 continue
 
             # 現在のグループIDに対応するマスク
-            group_mask_in_val = (val_g == group_id)
+            group_mask_in_val = val_g == group_id
 
             # このグループの予測ラベルと Augmentation タイプを取得
             group_preds = val_pred_labels[group_mask_in_val]
@@ -219,26 +219,32 @@ if __name__ == "__main__":
             if len(original_preds) == expected_pixels:
                 pred_masks.append(original_preds.reshape(H, W))
             else:
-                print(f"Warning (Fold {i+1}, Group {group_id}): Original prediction size mismatch. Expected {expected_pixels}, got {len(original_preds)}.")
+                print(
+                    f"Warning (Fold {i + 1}, Group {group_id}): Original prediction size mismatch. Expected {expected_pixels}, got {len(original_preds)}."
+                )
                 # サイズが違う場合はアンサンブルに含めないか、エラー処理をする
-                continue # このグループの保存をスキップ
+                continue  # このグループの保存をスキップ
 
             # 2. 上下反転の予測 -> 元に戻す
             if len(flipped_v_preds) == expected_pixels:
                 flipped_v_mask = flipped_v_preds.reshape(H, W)
-                unflipped_v_mask = cv2.flip(flipped_v_mask, 0) # 上下反転を戻す
+                unflipped_v_mask = cv2.flip(flipped_v_mask, 0)  # 上下反転を戻す
                 pred_masks.append(unflipped_v_mask)
             else:
-                print(f"Warning (Fold {i+1}, Group {group_id}): Flipped_v prediction size mismatch. Expected {expected_pixels}, got {len(flipped_v_preds)}.")
+                print(
+                    f"Warning (Fold {i + 1}, Group {group_id}): Flipped_v prediction size mismatch. Expected {expected_pixels}, got {len(flipped_v_preds)}."
+                )
                 continue
 
             # 3. 左右反転の予測 -> 元に戻す
             if len(flipped_h_preds) == expected_pixels:
                 flipped_h_mask = flipped_h_preds.reshape(H, W)
-                unflipped_h_mask = cv2.flip(flipped_h_mask, 1) # 左右反転を戻す
+                unflipped_h_mask = cv2.flip(flipped_h_mask, 1)  # 左右反転を戻す
                 pred_masks.append(unflipped_h_mask)
             else:
-                print(f"Warning (Fold {i+1}, Group {group_id}): Flipped_h prediction size mismatch. Expected {expected_pixels}, got {len(flipped_h_preds)}.")
+                print(
+                    f"Warning (Fold {i + 1}, Group {group_id}): Flipped_h prediction size mismatch. Expected {expected_pixels}, got {len(flipped_h_preds)}."
+                )
                 continue
 
             # --- アンサンブル (多数決) ---
@@ -251,19 +257,20 @@ if __name__ == "__main__":
 
                 # --- PNGで保存 ---
                 pred_mask_img_save = (final_mask * 255).astype(np.uint8)
-                output_filename = os.path.join(OUTPUT_PRED_DIR, f"fold{i + 1}_group{group_id}_{file_stem}_pred_aug_ensemble.png")
+                output_filename = os.path.join(
+                    OUTPUT_PRED_DIR, f"fold{i + 1}_group{group_id}_{file_stem}_pred_aug_ensemble.png"
+                )
                 try:
                     pil_img = Image.fromarray(pred_mask_img_save)
                     pil_img.save(output_filename)
                 except Exception as e:
                     print(f"Error saving ensemble prediction PNG for group {group_id}, fold {i + 1}: {e}")
             else:
-                 print(f"Skipping ensemble for group {group_id}, fold {i+1} due to missing predictions.")
-
+                print(f"Skipping ensemble for group {group_id}, fold {i + 1} due to missing predictions.")
 
         # モデル保存 (オプション)
-        model_filename = f"lgb_model_fold{i+1}_with_aug.joblib"
+        model_filename = f"lgb_model_fold{i + 1}_with_aug.joblib"
         joblib.dump(m, model_filename)
-        print(f"Model for Fold {i+1} saved as {model_filename}")
+        print(f"Model for Fold {i + 1} saved as {model_filename}")
 
     print("\n--- Processing Finished ---")

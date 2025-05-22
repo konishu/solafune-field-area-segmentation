@@ -1,0 +1,1 @@
+uv run src/train.py --config configs/ex9.yaml

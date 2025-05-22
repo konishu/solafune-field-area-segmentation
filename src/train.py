@@ -68,6 +68,7 @@ def train_model(
     wandb_log_images=True,  # Default value if not passed from main
     wandb_num_images_to_log=4,  # Default value if not passed from main
     accumulation_steps=1,  # <<< Minimal change: Added argument with default
+    pos_weight_ratio=[0.11, 99.0, 19.0],  # Default pos_weight for BCE loss
 ):
     """
     Trains the U-Net model using BCE + Dice loss with Linear Warmup + Cosine Decay LR schedule,
@@ -79,7 +80,13 @@ def train_model(
     model.to(device)
 
     # Use BCEWithLogitsLoss (reduction='mean' is simpler here)
-    criterion_bce = nn.BCEWithLogitsLoss()  # Default reduction='mean'
+    pos_weight = torch.tensor(
+        pos_weight_ratio,
+        device=device,
+        dtype=torch.float,
+    ).view(1, -1, 1, 1)
+    criterion_bce = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    # criterion_bce = nn.BCEWithLogitsLoss()  # Default reduction='mean'
     # No need for separate Dice criterion instance if using the function directly
 
     optimizer = optim.AdamW(model.parameters(), lr=initial_lr, weight_decay=weight_decay)
@@ -134,15 +141,15 @@ def train_model(
 
             with torch.amp.autocast(device_type=device, dtype=torch.bfloat16, enabled=(device == "cuda")):
                 outputs = model(imgs)
-                print(
-                    f"Debug: outputs.shape = {outputs.shape}, masks.shape = {masks.shape}"
-                )  # <<< デバッグ用プリント追加
+                # print(
+                #     f"Debug: outputs.shape = {outputs.shape}, masks.shape = {masks.shape}"
+                # )  # <<< デバッグ用プリント追加
                 if outputs.shape[2:] != masks.shape[2:]:
                     raise ValueError(f"Spatial dimension mismatch! Output: {outputs.shape}, Mask: {masks.shape}")
                 if outputs.shape[1] != masks.shape[1]:
                     raise ValueError(f"Channel dimension mismatch! Output: {outputs.shape}, Mask: {masks.shape}")
 
-                loss_bce = criterion_bce(outputs, masks)
+                loss_bce = criterion_bce(outputs, masks.float())
                 loss_dice = dice_loss(outputs, masks)
                 total_loss = bce_weight * loss_bce + dice_weight * loss_dice
 
@@ -344,6 +351,7 @@ if __name__ == "__main__":
     CACHE_DIR = os.path.join(ROOT_DIR, CACHE_DIR_BASE, EX_NUM, "cache")
     IMAGE_DIR = os.path.join(ROOT_DIR, cfg["data"]["image_dir"])
     ANNOTATION_FILE = os.path.join(ROOT_DIR, cfg["data"]["annotation_file"])
+    POS_WEIGHT_RATIO = cfg["data"]["pos_weight_ratio"]
 
     VALID_IMG_INDEX = cfg["data"]["valid_img_index"]
     NUM_WORKERS = cfg["data"]["num_workers"]
@@ -473,6 +481,10 @@ if __name__ == "__main__":
                 mean=DATASET_MEAN,
                 std=DATASET_STD,
             )
+            
+        print(f'{train_idxes=}')
+        print(f'{VALID_IMG_INDEX=}')
+        
 
         if len(train_dataset) == 0:
             print("Error: Training dataset is empty after filtering. Check file paths and validation indices.")
@@ -528,7 +540,8 @@ if __name__ == "__main__":
             weight_decay=WEIGHT_DECAY,
             wandb_log_images=WANDB_LOG_IMAGES,
             wandb_num_images_to_log=WANDB_NUM_IMAGES_TO_LOG,
-            accumulation_steps=ACCUMULATION_STEPS,  # <<< Minimal change: Pass accumulation_steps
+            accumulation_steps=ACCUMULATION_STEPS,
+            pos_weight_ratio=POS_WEIGHT_RATIO,
         )
 
         model_save_path = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM)

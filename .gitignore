@@ -13,6 +13,7 @@ unsloth_compiled_cache
 # project
 sandbox/*
 data/*
+wandb/*
 outputs/models/*
 outputs/ex*
 src/nohup*

@@ -20,6 +20,7 @@ from torch.utils.data import Dataset
 
 # from skimage.measure import label as skimage_label # Not used in this implementation
 
+
 def fill_nan_pixels(img):
     """Fill NaN pixels with the mean of their valid neighbors."""
     for c in range(img.shape[0]):  # 各チャネルについて
@@ -41,14 +42,16 @@ def fill_nan_pixels(img):
                     img[c, y, x] = 0
     return img
 
+
 def normalize_band(band):
     mean = np.mean(band)
     std = np.std(band)
-    # プラスマイナス３σの範囲内に値を収める
-    band = np.clip(band, mean - 3 * std, mean + 3 * std)
-    # 0-1の範囲で正規化
-    band = (band - band.min()) / (band.max() - band.min())
+    # # プラスマイナス３σの範囲内に値を収める
+    # band = np.clip(band, mean - 3 * std, mean + 3 * std)
+    # # 標準化して平均0、標準偏差1にする
+    band = (band - mean) / (std + 1e-6)  # Avoid division by zero
     return band
+
 
 # Helper function to convert COCO segmentation format to mask
 def segmentation_to_mask(segmentation, shape, scale_factor=1.0):
@@ -101,7 +104,7 @@ class FieldSegmentationDataset(Dataset):
         edge_width=3,
         contact_width=3,
         transform=None,
-        img_idxes = None,
+        img_idxes=None,
         mean=None,
         std=None,
     ):
@@ -157,7 +160,7 @@ class FieldSegmentationDataset(Dataset):
             if img_idxes is None:
                 all_files = os.listdir(img_dir)
             else:
-                all_files = [f'train_{idx}.tif' for idx in self.img_idxes]
+                all_files = [f"train_{idx}.tif" for idx in self.img_idxes]
         except FileNotFoundError:
             raise FileNotFoundError(f"Image directory not found: {img_dir}")
 
@@ -165,12 +168,12 @@ class FieldSegmentationDataset(Dataset):
         print(f"Found {len(self.img_filenames)} images in {img_dir} with annotations.")
         if not self.img_filenames:
             print(f"Warning: No matching .tif files found in {img_dir} listed in {ann_json_path}")
-        
+
         if os.path.exists(self.cache_dir):
             print(f"Cache directory exists: {self.cache_dir}")
         else:
             os.makedirs(self.cache_dir, exist_ok=True)
-        
+
         # --- (End of Initialization code) ---
 
     def __len__(self):
@@ -202,7 +205,7 @@ class FieldSegmentationDataset(Dataset):
                 with rasterio.open(img_path) as src:
                     img = src.read().astype(np.float32)  # (C, H, W)
                     img_shape = (src.height, src.width)
-                    
+
             except Exception as e:
                 print(f"Error loading image {img_path}: {e}")
                 raise OSError(f"Could not read image file {img_path}") from e
@@ -211,15 +214,15 @@ class FieldSegmentationDataset(Dataset):
                 raise ValueError(
                     f"Image {img_path} has unexpected shape: {img.shape}, expected (C, {img_shape[0]}, {img_shape[1]})"
                 )
-            
+
             # train_38,42にnanがあるので補完
             nan_mask = True
             for c in range(img.shape[0]):
                 nan_mask = np.isnan(img[c]) * nan_mask
             if np.any(nan_mask):
-                print(f"Warning: NaN pixels found in {img_path}. Filling with mean of neighbors.")  
-                img = fill_nan_pixels(img) 
-            
+                print(f"Warning: NaN pixels found in {img_path}. Filling with mean of neighbors.")
+                img = fill_nan_pixels(img)
+
             num_channels = img.shape[0]
             original_height, original_width = img_shape
 

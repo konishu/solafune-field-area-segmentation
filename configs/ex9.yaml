@@ -3,7 +3,7 @@ experiment:
   root_dir: "/workspace/projects/solafune-field-area-segmentation" # プロジェクトルートディレクトリ
   ex_num: "ex9" # 実験番号 (ファイル名から取得することも可能)
   output_dir_base: "outputs" # 出力ディレクトリのベース
-  cache_dir_base: "outputs" # キャッシュディレクトリのベース
+  cache_dir_base: "outputs/ex9/cache" # キャッシュディレクトリのベース
 
 # Data Configuration
 data:

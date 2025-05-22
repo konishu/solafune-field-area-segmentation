@@ -47,7 +47,7 @@ def main():
     OUTPUT_DIR_BASE = cfg["experiment"]["output_dir_base"]
     CACHE_DIR_BASE = cfg["experiment"]["cache_dir_base"]
     OUTPUT_DIR = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM)
-    CACHE_DIR = os.path.join(ROOT_DIR, CACHE_DIR_BASE, EX_NUM, "cache")
+    CACHE_DIR = os.path.join(ROOT_DIR, CACHE_DIR_BASE)
     IMAGE_DIR = os.path.join(ROOT_DIR, cfg["data"]["image_dir"])
     ANNOTATION_FILE = os.path.join(ROOT_DIR, cfg["data"]["annotation_file"])
     POS_WEIGHT_RATIO = cfg["data"]["pos_weight_ratio"]

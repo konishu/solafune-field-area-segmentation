@@ -5,7 +5,7 @@ from torch import nn
 
 
 class UNet(nn.Module):
-    def __init__(self, backbone_name="maxvit_small_tf_512.in1k", pretrained=True, num_classes=3, input_channels=12,img_size=1024):
+    def __init__(self, backbone_name="maxvit_small_tf_512.in1k", pretrained=True, num_classes=3, input_channels=13,img_size=1024):
         super().__init__()
         # エンコーダ（特徴マップ抽出）
         # TODO:img_sizeが適用できなかったので分離してるが、修正したい

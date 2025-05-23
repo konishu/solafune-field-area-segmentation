@@ -217,6 +217,11 @@ class FieldSegmentationDataset(Dataset):
             if np.any(nan_mask):
                 print(f"Warning: NaN pixels found in {img_path}. Filling with mean of neighbors.")
                 img = fill_nan_pixels(img)
+                
+            # NDVIを13バンドとして追加。NDVIはバンド8とバンド4を使用
+            # Sentinel-2 bands: 4 (Red), 8 (NIR)
+            NDVI = (img[7] - img[3]) / (img[7] + img[3] + 1e-6)  
+            img = np.concatenate((img, NDVI[np.newaxis, :, :]), axis=0)  # (C+1, H, W)
 
             num_channels = img.shape[0]
             original_height, original_width = img_shape

@@ -82,6 +82,7 @@ def main():
     WEIGHT_DECAY = cfg["training"]["weight_decay"]
     VALIDATION_INTERVAL = cfg["training"]["validation_interval"]
     ACCUMULATION_STEPS = cfg["training"].get("accumulation_steps", 1)
+    EARLY_STOPPING_THRESHOLD = cfg["training"].get("early_stopping_threshold", 10)
 
     WANDB_PROJECT = cfg["wandb"]["project"]
     WANDB_LOG_IMAGES = cfg["wandb"]["log_images"]
@@ -240,6 +241,7 @@ def main():
             wandb_num_images_to_log=WANDB_NUM_IMAGES_TO_LOG,
             accumulation_steps=ACCUMULATION_STEPS,
             pos_weight_ratio=POS_WEIGHT_RATIO,
+            early_stopping_threshold=EARLY_STOPPING_THRESHOLD,
         )
 
         model_save_path = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM)

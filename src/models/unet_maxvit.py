@@ -9,7 +9,7 @@ class UNet(nn.Module):
         super().__init__()
         # エンコーダ（特徴マップ抽出）
         # TODO:img_sizeが適用できなかったので分離してるが、修正したい
-        if backbone_name == "tf_efficientnetv2_m.in21k_ft_in1k":
+        if backbone_name in {"tf_efficientnetv2_m.in21k_ft_in1k", "tf_efficientnetv2_l.in21k_ft_in1k"}:
             self.encoder = timm.create_model(
                 backbone_name, pretrained=pretrained, features_only=True, in_chans=input_channels
             )

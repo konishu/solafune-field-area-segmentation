@@ -25,21 +25,23 @@ class UNet(nn.Module):
         self.center = nn.Conv2d(channels[-1], 512, kernel_size=3, padding=1)
 
         # デコーダ
-        self.decoder4 = self._decoder_block(512 + channels[-2], 256)
-        self.decoder3 = self._decoder_block(256 + channels[-3], 128)
-        self.decoder2 = self._decoder_block(128 + channels[-4], 64)
-        self.decoder1 = self._decoder_block(64 + channels[-5], 32)
+        self.decoder4 = self._decoder_block(512 + channels[-2], 256,dropout_p=0.2)
+        self.decoder3 = self._decoder_block(256 + channels[-3], 128,dropout_p=0.2)
+        self.decoder2 = self._decoder_block(128 + channels[-4], 64, dropout_p=0.2)
+        self.decoder1 = self._decoder_block(64 + channels[-5], 32, dropout_p=0.2)
 
         # 最終出力層
         self.final = nn.Conv2d(32, num_classes, kernel_size=1)
 
-    def _decoder_block(self, in_channels, out_channels):
+    def _decoder_block(self, in_channels, out_channels,dropout_p=0.2):
         return nn.Sequential(
             nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
             nn.Conv2d(in_channels, out_channels, 3, padding=1),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(p=dropout_p),
             nn.Conv2d(out_channels, out_channels, 3, padding=1),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(p=dropout_p),
         )
 
     def forward(self, x):

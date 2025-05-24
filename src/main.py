@@ -22,6 +22,7 @@ from utils.dataset import FieldSegmentationDataset
 from utils.calc import dice_coeff, dice_loss
 
 from train import train_model  # Import train_model function
+from test_inference import predict_on_test_data  # Import predict function
 
 
 def main():
@@ -89,6 +90,14 @@ def main():
     WANDB_LOG_IMAGE_FREQ = cfg["wandb"].get("log_image_freq", VALIDATION_INTERVAL)
     WANDB_NUM_IMAGES_TO_LOG = cfg["wandb"].get("num_images_to_log", 4)
     run_name = f"{EX_NUM}-{BACKBONE}"
+
+    TILE_H = cfg["test"].get("tile_h", 512)  # Use crop size if tile size not specified
+    TILE_W = cfg["test"].get("tile_w", 512)  # Use crop size if tile size not specified
+    STRIDE_H = cfg["test"].get("stride_h", 256)  # Default stride
+    STRIDE_W = cfg["test"].get("stride_w", 256)  # Default stride
+    PREDECT_DIR = os.path.join(cfg["test"].get("predicted_mask_dir", "predicted_masks"))
+    TEST_IMG_DIR = os.path.join(ROOT_DIR, cfg["test"].get("img_dir", "data/test_images"))
+    TEST_CLASS_THRESHOLDS = cfg["test"].get("class_thresholds", [0.5] * NUM_OUTPUT_CHANNELS)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -249,18 +258,73 @@ def main():
         final_model_name = "model_final.pth"
         torch.save(model.state_dict(), os.path.join(model_save_path, final_model_name))
         print(f"Model saved to {os.path.join(model_save_path, final_model_name)}")
+        
+        del model, train_dataset, valid_dataset, train_dataloader, valid_dataloader
+        torch.cuda.empty_cache()  # Clear GPU memory
+        print("Model and datasets cleared from memory.")
 
-        if final_best_dice_checkpoint_path and os.path.exists(final_best_dice_checkpoint_path):
-            # コピーして固定名で保存 (例: model_best_dice.pth)
-            destination_best_dice_path = os.path.join(OUTPUT_DIR, "model_best_dice.pth")
-            shutil.copyfile(final_best_dice_checkpoint_path, destination_best_dice_path)
-            print(
-                f"Best dice model (from {final_best_dice_checkpoint_path}) also saved as {destination_best_dice_path}"
-            )
-            if wandb.run:  # WandBにも最終的なベストパスを記録 (サマリーではなくアーティファクトの方が良いかもしれない)
-                wandb.summary["final_selected_best_dice_model_path_on_disk"] = destination_best_dice_path
-        else:
-            print("No best dice checkpoint was saved during training, or the path was invalid.")
+        ###############################
+        # test_inference.pyの実行
+        ###############################
+        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS, img_size=RESIZE_W)
+        model.load_state_dict(torch.load(final_best_dice_checkpoint_path))
+        model.to(DEVICE)
+        model.eval()
+        print(f"Model loaded from {final_best_dice_checkpoint_path}")
+        print("Setting up test dataset...")
+        print("Running inference on test images...")
+        os.makedirs(PREDECT_DIR, exist_ok=True)
+
+        test_dataset = FieldSegmentationDataset(
+            img_dir=TEST_IMG_DIR,
+            scale_factor=SCALE_FACTOR,
+            transform=A.Compose([ToTensorV2()]),
+            contact_width=CONTACT_WIDTH,
+            edge_width=EDGE_WIDTH,
+            cache_dir=CACHE_DIR,
+            is_test_mode=True,
+        )
+        
+        test_dataloader = DataLoader(
+            test_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=NUM_WORKERS,
+        )
+        
+        predict_on_test_data(
+            model=model,
+            dataset=test_dataset,
+            dataloader=test_dataloader,
+            device=DEVICE,
+            class_thresholds=TEST_CLASS_THRESHOLDS,
+            num_output_channels=NUM_OUTPUT_CHANNELS,
+            tile_h=TILE_H,
+            tile_w=TILE_W,
+            stride_h=STRIDE_H,
+            stride_w=STRIDE_W,
+            resize_h=RESIZE_H,
+            resize_w=RESIZE_W,
+            prediction_dir=PREDECT_DIR,
+        )
+        
+        
+        
+        
+        
+        
+
+        # if final_best_dice_checkpoint_path and os.path.exists(final_best_dice_checkpoint_path):
+        #     # コピーして固定名で保存 (例: model_best_dice.pth)
+        #     destination_best_dice_path = os.path.join(OUTPUT_DIR, "model_best_dice.pth")
+        #     shutil.copyfile(final_best_dice_checkpoint_path, destination_best_dice_path)
+        #     print(
+        #         f"Best dice model (from {final_best_dice_checkpoint_path}) also saved as {destination_best_dice_path}"
+        #     )
+        #     if wandb.run:  # WandBにも最終的なベストパスを記録 (サマリーではなくアーティファクトの方が良いかもしれない)
+        #         wandb.summary["final_selected_best_dice_model_path_on_disk"] = destination_best_dice_path
+        # else:
+        #     print("No best dice checkpoint was saved during training, or the path was invalid.")
 
     except NameError as e:
         print(f"Error: Class not found (FieldSegmentationDataset or UNet?). Details: {e}")

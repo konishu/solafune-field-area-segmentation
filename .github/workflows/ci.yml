@@ -5,12 +5,12 @@ on:
   push:
     branches:
       - main # mainブランチへのpush時
-      - develop # developブランチへのpush時 (もしあれば)
-      - 'feature/**' # feature/* ブランチへのpush時
+      - 'feature/**'
+      - 'cicd/**'
+      - 'train/**'
   pull_request:
     branches:
       - main # mainブランチへのプルリクエスト時
-      - develop # developブランチへのプルリクエスト時 (もしあれば)
 
 jobs:
   lint_and_test:

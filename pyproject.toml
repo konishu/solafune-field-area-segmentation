@@ -42,6 +42,7 @@ dev-dependencies = [
   "seaborn>=0.13.2",
   "streamlit>=1.43.2",
   "kagglehub>=0.3.10",
+  "ruff"
 ]
 
 

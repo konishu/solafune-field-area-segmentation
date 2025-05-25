@@ -1,0 +1,41 @@
+name: Python Project CI
+
+# CIをトリガーするイベントを指定
+on:
+  push:
+    branches:
+      - main # mainブランチへのpush時
+      - 'feature/**'
+      - 'cicd/**'
+  pull_request:
+    branches:
+      - main # mainブランチへのプルリクエスト時
+
+jobs:
+  lint_and_test:
+    runs-on: ubuntu-latest # CIを実行する仮想環境
+    strategy:
+      matrix:
+        python-version: ["3.12"] # pyproject.toml の 'requires-python' に合わせる
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4 # リポジトリのコードをチェックアウト
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5 # 指定したバージョンのPythonをセットアップ
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        run: pip install uv # パッケージマネージャuvをインストール
+
+      - name: Install dependencies
+        run: uv sync --frozen # 依存関係をインストール (pyproject.tomlに基づく)
+
+      - name: Lint with ruff
+        run: uv run ruff check src # ruffでリンティング (対象パスは適宜調整)
+        # .clinerules に記載の 'mise run lint' に相当
+
+      - name: Check formatting with ruff
+        run: uv run ruff format --check src # ruffでフォーマットチェック (対象パスは適宜調整)

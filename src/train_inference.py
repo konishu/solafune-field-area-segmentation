@@ -22,7 +22,7 @@ from utils.dataset import FieldSegmentationDataset  # Corrected class name
 def load_config(config_path):
     """Loads configuration from a YAML file."""
     try:
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             cfg = yaml.safe_load(f)
         return cfg
     except FileNotFoundError:
@@ -32,10 +32,15 @@ def load_config(config_path):
         print(f"Error loading configuration file: {e}")
         exit()
 
+
 # --- Argument Parser ---
 parser = argparse.ArgumentParser(description="Inference script for field segmentation")
-parser.add_argument('--config', type=str, default='../configs/ex7.yaml', # Default config path
-                    help='Path to the configuration YAML file')
+parser.add_argument(
+    "--config",
+    type=str,
+    default="../configs/ex9.yaml",  # Default config path
+    help="Path to the configuration YAML file",
+)
 args = parser.parse_args()
 
 # --- Load Configuration ---
@@ -44,41 +49,41 @@ print("Configuration loaded:")
 
 
 # --- Configuration (Derived from loaded cfg) ---
-ROOT_DIR = cfg['experiment']['root_dir']
-EX_NUM = cfg['experiment']['ex_num']
-OUTPUT_DIR_BASE = cfg['experiment']['output_dir_base']
-CACHE_DIR_BASE = cfg['experiment']['cache_dir_base']
+ROOT_DIR = cfg["experiment"]["root_dir"]
+EX_NUM = cfg["experiment"]["ex_num"]
+OUTPUT_DIR_BASE = cfg["experiment"]["output_dir_base"]
+CACHE_DIR_BASE = cfg["experiment"]["cache_dir_base"]
 # Construct full paths relative to ROOT_DIR
-OUTPUT_DIR = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM) # Keep check subdir for debug outputs if needed
+OUTPUT_DIR = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM)  # Keep check subdir for debug outputs if needed
 CACHE_DIR = os.path.join(ROOT_DIR, CACHE_DIR_BASE, EX_NUM, "cache")
-IMAGE_DIR = os.path.join(ROOT_DIR, cfg['validation']['image_dir'])
-ANNOTATION_FILE = os.path.join(ROOT_DIR, cfg['data']['annotation_file'])
-MODEL_PATH = os.path.join(OUTPUT_DIR, 'model_final.pth') # Use saved model name from config
+IMAGE_DIR = os.path.join(ROOT_DIR, cfg["test"]["image_dir"])
+ANNOTATION_FILE = os.path.join(ROOT_DIR, cfg["data"]["annotation_file"])
+MODEL_PATH = os.path.join(ROOT_DIR, cfg["test"]["model_dir"], "model_best_dice.pth")  # Use saved model name from config
 PREDICTION_DIR = os.path.join(
-    OUTPUT_DIR, "train_predictions_inference_script" # Keep the specific output folder name for now
+    OUTPUT_DIR,
+    "train_predictions_inference_script",  # Keep the specific output folder name for now
 )
-BACKBONE = cfg['model']['backbone']
-NUM_OUTPUT_CHANNELS = cfg['model']['num_output_channels']
-PRETRAINED = False # Set to False for inference as we load weights from MODEL_PATH
-NUM_WORKERS = cfg['validation']['num_workers']
+BACKBONE = cfg["model"]["backbone"]
+NUM_OUTPUT_CHANNELS = cfg["model"]["num_output_channels"]
+PRETRAINED = False  # Set to False for inference as we load weights from MODEL_PATH
+NUM_WORKERS = cfg["validation"]["num_workers"]
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Dataset/Preprocessing parameters should match training
-SCALE_FACTOR = cfg['data']['scale_factor']
-CONTACT_WIDTH = cfg['data']['contact_width']
-EDGE_WIDTH = cfg['data']['edge_width']
+SCALE_FACTOR = cfg["data"]["scale_factor"]
+CONTACT_WIDTH = cfg["data"]["contact_width"]
+EDGE_WIDTH = cfg["data"]["edge_width"]
 # CROP_H/W might correspond to the size used during validation transforms if different from resize
-CROP_H = cfg['training']['crop_h'] # Assuming validation used cropping
-CROP_W = cfg['training']['crop_w']
+CROP_H = cfg["training"]["crop_h"]  # Assuming validation used cropping
+CROP_W = cfg["training"]["crop_w"]
 # RESIZE_H/W is the actual model input size
-RESIZE_H = cfg['training']['resize_h']
-RESIZE_W = cfg['training']['resize_w']
-DATASET_MEAN = cfg['data'].get('mean', None) # Use get for optional keys
-DATASET_STD = cfg['data'].get('std', None)
-TILE_H = cfg['validation'].get('tile_h', 512) # Use crop size if tile size not specified
-TILE_W = cfg['validation'].get('tile_w', 512) # Use crop size if tile size not specified
-STRIDE_H = cfg['validation'].get('stride_h', 256) # Default stride
-STRIDE_W = cfg['validation'].get('stride_w', 256) # Default stride
-
+RESIZE_H = cfg["training"]["resize_h"]
+RESIZE_W = cfg["training"]["resize_w"]
+DATASET_MEAN = cfg["data"].get("mean", None)  # Use get for optional keys
+DATASET_STD = cfg["data"].get("std", None)
+TILE_H = cfg["validation"].get("tile_h", 512)  # Use crop size if tile size not specified
+TILE_W = cfg["validation"].get("tile_w", 512)  # Use crop size if tile size not specified
+STRIDE_H = cfg["validation"].get("stride_h", 256)  # Default stride
+STRIDE_W = cfg["validation"].get("stride_w", 256)  # Default stride
 
 
 if __name__ == "__main__":
@@ -105,7 +110,6 @@ if __name__ == "__main__":
         # Initialize dataset
         dataset = FieldSegmentationDataset(
             img_dir=IMAGE_DIR,
-            ann_json_path=ANNOTATION_FILE,
             scale_factor=SCALE_FACTOR,
             transform=transform,
             contact_width=CONTACT_WIDTH,  # Match training settings
@@ -113,6 +117,7 @@ if __name__ == "__main__":
             mean=DATASET_MEAN,
             std=DATASET_STD,
             cache_dir=CACHE_DIR,
+            is_test_mode=True,  # Set to True for inference
         )
 
         if len(dataset) == 0:
@@ -127,7 +132,7 @@ if __name__ == "__main__":
 
         print("Initializing and loading model...")
         # Initialize model structure
-        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS,img_size=RESIZE_W)
+        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS, img_size=RESIZE_W)
 
         # Load the saved state dictionary
         if not os.path.exists(MODEL_PATH):
@@ -193,7 +198,7 @@ if __name__ == "__main__":
                     print(f"Warning: Skipping empty batch at index {idx}")
                     continue
 
-                img_tensor, _ , _ = batch  # Get the single image tensor (C, H, W)
+                img_tensor, _, _ = batch  # Get the single image tensor (C, H, W)
                 img_tensor = img_tensor.squeeze(0)  # Remove batch dimension -> (C, H, W)
                 c, original_h, original_w = img_tensor.shape  # Get original dimensions *after* transform (Resize)
 
@@ -210,24 +215,25 @@ if __name__ == "__main__":
                 # --- Process tiles ---
                 tile_progress_bar = tqdm(zip(tiles, coords), total=len(tiles), desc=f"  Tiles Img {idx}", leave=False)
                 for tile_data, (y_start, x_start) in tile_progress_bar:
-                    tile_tensor = tile_data.to(DEVICE) # Tile is already (C, TILE_H, TILE_W)
+                    tile_tensor = tile_data.to(DEVICE)  # Tile is already (C, TILE_H, TILE_W)
 
                     # --- Resize tile to model input size ---
                     # Add batch dimension for interpolate and model input
-                    tile_tensor_batch = tile_tensor.unsqueeze(0) # (1, C, TILE_H, TILE_W)
+                    tile_tensor_batch = tile_tensor.unsqueeze(0)  # (1, C, TILE_H, TILE_W)
                     resized_tile_tensor = torch.nn.functional.interpolate(
-                        tile_tensor_batch, size=(RESIZE_H, RESIZE_W), mode='bilinear', align_corners=False
-                    ) # (1, C, RESIZE_H, RESIZE_W)
+                        tile_tensor_batch, size=(RESIZE_H, RESIZE_W), mode="bilinear", align_corners=False
+                    )  # (1, C, RESIZE_H, RESIZE_W)
 
                     # --- Perform inference on the resized tile ---
-                    tile_output = model(resized_tile_tensor) # Output shape (1, NUM_OUTPUT_CHANNELS, RESIZE_H, RESIZE_W)
+                    tile_output = model(
+                        resized_tile_tensor
+                    )  # Output shape (1, NUM_OUTPUT_CHANNELS, RESIZE_H, RESIZE_W)
                     tile_output = torch.sigmoid(tile_output)
 
                     # --- Resize prediction back to original tile size ---
                     resized_back_output = torch.nn.functional.interpolate(
-                        tile_output, size=(TILE_H, TILE_W), mode='bilinear', align_corners=False
-                    ).squeeze(0) # Remove batch dim -> (NUM_OUTPUT_CHANNELS, TILE_H, TILE_W)
-
+                        tile_output, size=(TILE_H, TILE_W), mode="bilinear", align_corners=False
+                    ).squeeze(0)  # Remove batch dim -> (NUM_OUTPUT_CHANNELS, TILE_H, TILE_W)
 
                     # Determine the region in the full map corresponding to this tile
                     y_end = min(y_start + TILE_H, original_h)
@@ -272,7 +278,9 @@ if __name__ == "__main__":
                         print(f"  Input size (after scale_factor): ({original_h}, {original_w})")
                         print(f"  Output mask size: ({output_h}, {output_w})")
                     else:
-                         print(f"Output mask size ({output_h}, {output_w}) matches input size for {original_img_filename}.")
+                        print(
+                            f"Output mask size ({output_h}, {output_w}) matches input size for {original_img_filename}."
+                        )
                     # ---------------------------------------------------------
 
                     # Save each class mask separately
@@ -291,7 +299,7 @@ if __name__ == "__main__":
                             combined_mask_bgr[:, :, 0] = (final_mask_np[:, :, 0] * 255).astype(np.uint8)  # Blue
                         if final_mask_np.shape[2] > 1:
                             combined_mask_bgr[:, :, 1] = (final_mask_np[:, :, 1] * 255).astype(np.uint8)  # Green
-                        if final_mask_np.shape[2] > 2: # noqa: PLR2004
+                        if final_mask_np.shape[2] > 2:  # noqa: PLR2004
                             combined_mask_bgr[:, :, 2] = (final_mask_np[:, :, 2] * 255).astype(np.uint8)  # Red
 
                         combined_output_path = os.path.join(
@@ -301,7 +309,7 @@ if __name__ == "__main__":
                         print(f"Output mask saved for {original_img_filename} to {combined_output_path}")
                         progress_bar_infer.set_postfix(saved=original_img_filename)
 
-                    except (OSError, TypeError, cv2.error) as e: # Catch more specific errors
+                    except (OSError, TypeError, cv2.error) as e:  # Catch more specific errors
                         print(f"Error saving prediction for {original_img_filename}: {e}")
                 else:
                     print(f"Warning: Index {idx} out of bounds for dataset filenames.")
@@ -314,5 +322,5 @@ if __name__ == "__main__":
         )
     except FileNotFoundError as e:
         print(f"Error: File or directory not found. Please check paths. Details: {e}")
-    except (RuntimeError, ValueError, ImportError, TypeError) as e: # Catch more specific setup/inference errors
+    except (RuntimeError, ValueError, ImportError, TypeError) as e:  # Catch more specific setup/inference errors
         print(f"An error occurred during setup or inference: {e}")

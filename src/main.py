@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 import json  # アノテーションファイル読み込みのため追加
 import argparse  # YAML読み込みのため追加
 import yaml  # YAML読み込みのため追加
@@ -8,6 +9,7 @@ import torch
 import torchvision  # For image logging
 import wandb  # Import WANDB
 from dotenv import load_dotenv  # Import dotenv
+import gc  # For garbage collection
 
 import albumentations as A
 import cv2  # Import OpenCV
@@ -17,11 +19,13 @@ from torch import nn, optim
 from torch.optim import lr_scheduler  # Import LR scheduler (LinearLR, CosineAnnealingLR, SequentialLR)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from sklearn.model_selection import KFold 
 
 from utils.dataset import FieldSegmentationDataset
 from utils.calc import dice_coeff, dice_loss
 
 from train import train_model  # Import train_model function
+from test_inference import predict_on_test_data  # Import predict function
 
 
 def main():
@@ -82,12 +86,21 @@ def main():
     WEIGHT_DECAY = cfg["training"]["weight_decay"]
     VALIDATION_INTERVAL = cfg["training"]["validation_interval"]
     ACCUMULATION_STEPS = cfg["training"].get("accumulation_steps", 1)
+    EARLY_STOPPING_THRESHOLD = cfg["training"].get("early_stopping_threshold", 10)
 
     WANDB_PROJECT = cfg["wandb"]["project"]
     WANDB_LOG_IMAGES = cfg["wandb"]["log_images"]
     WANDB_LOG_IMAGE_FREQ = cfg["wandb"].get("log_image_freq", VALIDATION_INTERVAL)
     WANDB_NUM_IMAGES_TO_LOG = cfg["wandb"].get("num_images_to_log", 4)
     run_name = f"{EX_NUM}-{BACKBONE}"
+
+    TILE_H = cfg["test"].get("tile_h", 512)  # Use crop size if tile size not specified
+    TILE_W = cfg["test"].get("tile_w", 512)  # Use crop size if tile size not specified
+    STRIDE_H = cfg["test"].get("stride_h", 256)  # Default stride
+    STRIDE_W = cfg["test"].get("stride_w", 256)  # Default stride
+    PREDECT_DIR = os.path.join(cfg["test"].get("predicted_mask_dir", "predicted_masks"))
+    TEST_IMG_DIR = os.path.join(ROOT_DIR, cfg["test"].get("img_dir", "data/test_images"))
+    TEST_CLASS_THRESHOLDS = cfg["test"].get("class_thresholds", [0.5] * NUM_OUTPUT_CHANNELS)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -112,9 +125,7 @@ def main():
     except Exception as e:
         print(f"Error reading image file list or annotations: {e}")
         exit()
-    train_img_filenames = [fn for i, fn in enumerate(all_img_filenames) if i not in VALID_IMG_INDEX]
-    valid_img_filenames = [fn for i, fn in enumerate(all_img_filenames) if i in VALID_IMG_INDEX]
-    print(f"Using {len(train_img_filenames)} images for training and {len(valid_img_filenames)} for validation.")
+ 
 
     transform_train = A.Compose(
         [
@@ -136,144 +147,204 @@ def main():
     )
 
     print(f"Images will be cropped to {CROP_H}x{CROP_W} then resized to {RESIZE_H}x{RESIZE_W} for model input.")
-    train_idxes = [i for i in range(len(all_img_filenames)) if i not in VALID_IMG_INDEX]
-    print(f"train idx: {train_idxes}")
+    
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    train_img_idxed = list(range(len(all_img_filenames)))
+    for fold, (train_idxes, valid_idxes) in enumerate(kf.split(train_img_idxed)):
+        print(f"Fold {fold + 1}: Train indices {train_idxes}, Validation indices {valid_idxes}")
 
-    try:
-        wandb_config_log = {
-            "config_file": args.config,
-            "experiment": cfg["experiment"],
-            "data": cfg["data"],
-            "model": cfg["model"],
-            "training": cfg["training"],
-            "optimizer": "AdamW",
-        }
-        wandb.init(project=WANDB_PROJECT, name=run_name, config=wandb_config_log)
+        try:
+            wandb_config_log = {
+                "config_file": args.config,
+                "experiment": cfg["experiment"],
+                "data": cfg["data"],
+                "model": cfg["model"],
+                "training": cfg["training"],
+                "optimizer": "AdamW",
+            }
+            wandb.init(project=WANDB_PROJECT, name=run_name + f'_{fold}', config=wandb_config_log)
 
-        print("Initializing Training Dataset...")
-        train_dataset = FieldSegmentationDataset(
-            img_dir=IMAGE_DIR,
-            ann_json_path=ANNOTATION_FILE,
-            cache_dir=CACHE_DIR,
-            scale_factor=SCALE_FACTOR,
-            transform=transform_train,
-            contact_width=CONTACT_WIDTH,
-            edge_width=EDGE_WIDTH,
-            img_idxes=train_idxes,
-            mean=DATASET_MEAN,
-            std=DATASET_STD,
-        )
-
-        valid_dataset = None
-        if valid_img_filenames:
-            print("Initializing Validation Dataset...")
-            valid_dataset = FieldSegmentationDataset(
+            print("Initializing Training Dataset...")
+            train_dataset = FieldSegmentationDataset(
                 img_dir=IMAGE_DIR,
                 ann_json_path=ANNOTATION_FILE,
                 cache_dir=CACHE_DIR,
                 scale_factor=SCALE_FACTOR,
-                transform=transform_valid,
+                transform=transform_train,
                 contact_width=CONTACT_WIDTH,
                 edge_width=EDGE_WIDTH,
-                img_idxes=VALID_IMG_INDEX,
+                img_idxes=train_idxes,
                 mean=DATASET_MEAN,
                 std=DATASET_STD,
             )
 
-        print(f"{train_idxes=}")
-        print(f"{VALID_IMG_INDEX=}")
+            valid_dataset = None
+            if VALID_IMG_INDEX:
+                print("Initializing Validation Dataset...")
+                valid_dataset = FieldSegmentationDataset(
+                    img_dir=IMAGE_DIR,
+                    ann_json_path=ANNOTATION_FILE,
+                    cache_dir=CACHE_DIR,
+                    scale_factor=SCALE_FACTOR,
+                    transform=transform_valid,
+                    contact_width=CONTACT_WIDTH,
+                    edge_width=EDGE_WIDTH,
+                    img_idxes=valid_idxes,
+                    mean=DATASET_MEAN,
+                    std=DATASET_STD,
+                )
 
-        if len(train_dataset) == 0:
-            print("Error: Training dataset is empty after filtering. Check file paths and validation indices.")
-            exit()
-        if valid_dataset is None or len(valid_dataset) == 0:
-            print("Warning: Validation dataset is empty or could not be created. Validation will be skipped.")
-            valid_dataloader = None
-        else:
-            print(f"Validation dataset initialized with {len(valid_dataset)} samples.")
-        print(f"Training dataset initialized with {len(train_dataset)} samples.")
+            print(f"{train_idxes=}")
+            print(f"{valid_idxes=}")
 
-        train_dataloader = DataLoader(
-            train_dataset,
-            batch_size=BATCH_SIZE,
-            shuffle=True,
-            num_workers=NUM_WORKERS,
-            pin_memory=True if DEVICE == "cuda" else False,
-            drop_last=True,
-        )
-        if valid_dataset and len(valid_dataset) > 0:
-            valid_dataloader = DataLoader(
-                valid_dataset,
+            if len(train_dataset) == 0:
+                print("Error: Training dataset is empty after filtering. Check file paths and validation indices.")
+                sys.exit()
+            if valid_dataset is None or len(valid_dataset) == 0:
+                print("Warning: Validation dataset is empty or could not be created. Validation will be skipped.")
+                valid_dataloader = None
+            else:
+                print(f"Validation dataset initialized with {len(valid_dataset)} samples.")
+            print(f"Training dataset initialized with {len(train_dataset)} samples.")
+
+            train_dataloader = DataLoader(
+                train_dataset,
                 batch_size=BATCH_SIZE,
-                shuffle=False,
+                shuffle=True,
                 num_workers=NUM_WORKERS,
                 pin_memory=True if DEVICE == "cuda" else False,
-                drop_last=False,
+                drop_last=True,
             )
-        else:
-            valid_dataloader = None
+            if valid_dataset and len(valid_dataset) > 0:
+                valid_dataloader = DataLoader(
+                    valid_dataset,
+                    batch_size=1,
+                    shuffle=False,
+                    num_workers=NUM_WORKERS,
+                    pin_memory=True if DEVICE == "cuda" else False,
+                    drop_last=False,
+                )
+            else:
+                valid_dataloader = None
 
-        print("Dataloaders ready.")
-        print("Initializing model...")
-        model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS, img_size=RESIZE_H)
-        model.to(DEVICE)
-        print(
-            f"Model: UNet with {BACKBONE} backbone, {NUM_OUTPUT_CHANNELS} output channels, input size {RESIZE_H}x{RESIZE_W}."
-        )
-
-        final_best_dice_checkpoint_path = train_model(
-            model=model,
-            train_dataloader=train_dataloader,
-            valid_dataloader=valid_dataloader,
-            validation_interval=VALIDATION_INTERVAL,
-            output_dir=OUTPUT_DIR,
-            num_epochs=NUM_EPOCHS,
-            device=DEVICE,
-            bce_weight=BCE_WEIGHT,
-            dice_weight=DICE_WEIGHT,
-            initial_lr=INITIAL_LR,
-            warmup_epochs=WARMUP_EPOCHS,
-            cosine_decay_epochs=NUM_EPOCHS,
-            min_lr=MIN_LR,
-            weight_decay=WEIGHT_DECAY,
-            wandb_log_images=WANDB_LOG_IMAGES,
-            wandb_num_images_to_log=WANDB_NUM_IMAGES_TO_LOG,
-            accumulation_steps=ACCUMULATION_STEPS,
-            pos_weight_ratio=POS_WEIGHT_RATIO,
-        )
-
-        model_save_path = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM)
-        os.makedirs(model_save_path, exist_ok=True)
-        final_model_name = "model_final.pth"
-        torch.save(model.state_dict(), os.path.join(model_save_path, final_model_name))
-        print(f"Model saved to {os.path.join(model_save_path, final_model_name)}")
-
-        if final_best_dice_checkpoint_path and os.path.exists(final_best_dice_checkpoint_path):
-            # コピーして固定名で保存 (例: model_best_dice.pth)
-            destination_best_dice_path = os.path.join(OUTPUT_DIR, "model_best_dice.pth")
-            shutil.copyfile(final_best_dice_checkpoint_path, destination_best_dice_path)
+            print("Dataloaders ready.")
+            print("Initializing model...")
+            model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS, img_size=RESIZE_H)
+            model.to(DEVICE)
             print(
-                f"Best dice model (from {final_best_dice_checkpoint_path}) also saved as {destination_best_dice_path}"
+                f"Model: UNet with {BACKBONE} backbone, {NUM_OUTPUT_CHANNELS} output channels, input size {RESIZE_H}x{RESIZE_W}."
             )
-            if wandb.run:  # WandBにも最終的なベストパスを記録 (サマリーではなくアーティファクトの方が良いかもしれない)
-                wandb.summary["final_selected_best_dice_model_path_on_disk"] = destination_best_dice_path
-        else:
-            print("No best dice checkpoint was saved during training, or the path was invalid.")
 
-    except NameError as e:
-        print(f"Error: Class not found (FieldSegmentationDataset or UNet?). Details: {e}")
-        print("Ensure 'src' is in PYTHONPATH or run from the project root. Cannot run training.")
-    except FileNotFoundError as e:
-        print(f"Error: File or directory not found. Please check paths. Details: {e}")
-    except Exception as e:
-        print(f"An unexpected error occurred during setup or training: {e}")
-        import traceback
+            final_best_dice_checkpoint_path = train_model(
+                model=model,
+                train_dataloader=train_dataloader,
+                valid_dataloader=valid_dataloader,
+                validation_interval=VALIDATION_INTERVAL,
+                output_dir=OUTPUT_DIR,
+                num_epochs=NUM_EPOCHS,
+                device=DEVICE,
+                bce_weight=BCE_WEIGHT,
+                dice_weight=DICE_WEIGHT,
+                initial_lr=INITIAL_LR,
+                warmup_epochs=WARMUP_EPOCHS,
+                cosine_decay_epochs=NUM_EPOCHS,
+                min_lr=MIN_LR,
+                weight_decay=WEIGHT_DECAY,
+                wandb_log_images=WANDB_LOG_IMAGES,
+                wandb_num_images_to_log=WANDB_NUM_IMAGES_TO_LOG,
+                accumulation_steps=ACCUMULATION_STEPS,
+                pos_weight_ratio=POS_WEIGHT_RATIO,
+                early_stopping_threshold=EARLY_STOPPING_THRESHOLD,
+            )
 
-        traceback.print_exc()
-    finally:
-        if wandb.run:
-            print("Finishing WANDB run...")
-            wandb.finish()
+            model_save_path = os.path.join(ROOT_DIR, OUTPUT_DIR_BASE, EX_NUM)
+            os.makedirs(model_save_path, exist_ok=True)
+            final_model_name = "model_final.pth"
+            torch.save(model.state_dict(), os.path.join(model_save_path, final_model_name))
+            print(f"Model saved to {os.path.join(model_save_path, final_model_name)}")
+            
+            del model, train_dataset, valid_dataset, train_dataloader, valid_dataloader
+            gc.collect()  # 明示的にガベージコレクションを試みる
+            torch.cuda.empty_cache()  # Clear GPU memory
+            print("Model and datasets cleared from memory.")
+
+            ###############################
+            # test_inference.pyの実行
+            ###############################
+            model = UNet(backbone_name=BACKBONE, pretrained=PRETRAINED, num_classes=NUM_OUTPUT_CHANNELS, img_size=RESIZE_W)
+            model.load_state_dict(torch.load(final_best_dice_checkpoint_path))
+            model.to(DEVICE)
+            model.eval()
+            print(f"Model loaded from {final_best_dice_checkpoint_path}")
+            print("Setting up test dataset...")
+            print("Running inference on test images...")
+            os.makedirs(PREDECT_DIR, exist_ok=True)
+
+            test_dataset = FieldSegmentationDataset(
+                img_dir=TEST_IMG_DIR,
+                scale_factor=SCALE_FACTOR,
+                transform=A.Compose([ToTensorV2()]),
+                contact_width=CONTACT_WIDTH,
+                edge_width=EDGE_WIDTH,
+                cache_dir=CACHE_DIR,
+                is_test_mode=True,
+            )
+            
+            test_dataloader = DataLoader(
+                test_dataset,
+                batch_size=1,
+                shuffle=False,
+                num_workers=NUM_WORKERS,
+            )
+            
+            test_result_saved_path = os.path.join(PREDECT_DIR, f"{BACKBONE}_scalefactor_{SCALE_FACTOR}", str(fold))
+            os.makedirs(test_result_saved_path, exist_ok=True)
+            predict_on_test_data(
+                model=model,
+                dataset=test_dataset,
+                dataloader=test_dataloader,
+                device=DEVICE,
+                class_thresholds=TEST_CLASS_THRESHOLDS,
+                num_output_channels=NUM_OUTPUT_CHANNELS,
+                tile_h=TILE_H,
+                tile_w=TILE_W,
+                stride_h=STRIDE_H,
+                stride_w=STRIDE_W,
+                resize_h=RESIZE_H,
+                resize_w=RESIZE_W,
+                prediction_dir=test_result_saved_path,
+            )
+            
+            del model, test_dataset, test_dataloader
+            torch.cuda.empty_cache()  # Clear GPU memory after inference
+            print("Inference completed and results saved.")
+
+            # if final_best_dice_checkpoint_path and os.path.exists(final_best_dice_checkpoint_path):
+            #     # コピーして固定名で保存 (例: model_best_dice.pth)
+            #     destination_best_dice_path = os.path.join(OUTPUT_DIR, "model_best_dice.pth")
+            #     shutil.copyfile(final_best_dice_checkpoint_path, destination_best_dice_path)
+            #     print(
+            #         f"Best dice model (from {final_best_dice_checkpoint_path}) also saved as {destination_best_dice_path}"
+            #     )
+            #     if wandb.run:  # WandBにも最終的なベストパスを記録 (サマリーではなくアーティファクトの方が良いかもしれない)
+            #         wandb.summary["final_selected_best_dice_model_path_on_disk"] = destination_best_dice_path
+            # else:
+            #     print("No best dice checkpoint was saved during training, or the path was invalid.")
+
+        except NameError as e:
+            print(f"Error: Class not found (FieldSegmentationDataset or UNet?). Details: {e}")
+            print("Ensure 'src' is in PYTHONPATH or run from the project root. Cannot run training.")
+        except FileNotFoundError as e:
+            print(f"Error: File or directory not found. Please check paths. Details: {e}")
+        except Exception as e:
+            print(f"An unexpected error occurred during setup or training: {e}")
+            import traceback
+
+            traceback.print_exc()
+        finally:
+            if wandb.run:
+                print("Finishing WANDB run...")
+                wandb.finish()
         print("Training script finished.")
 
 

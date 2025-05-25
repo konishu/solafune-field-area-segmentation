@@ -7,7 +7,6 @@ on:
       - main # mainブランチへのpush時
       - 'feature/**'
       - 'cicd/**'
-      - 'train/**'
   pull_request:
     branches:
       - main # mainブランチへのプルリクエスト時

@@ -32,7 +32,7 @@ jobs:
         run: pip install uv # パッケージマネージャuvをインストール
 
       - name: Install dependencies
-        run: uv sync --frozen-lock # uv.lock に基づいて依存関係をインストール
+        run: uv sync --frozen # 依存関係をインストール (pyproject.tomlに基づく)
 
       - name: Lint with ruff
         run: uv run ruff check src # ruffでリンティング (対象パスは適宜調整)
